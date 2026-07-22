@@ -423,17 +423,10 @@
     return null;
   }
 
-  // Nur „ganz Besonderes": POIs mit wikidata-Tag (= enzyklopädie-würdig) nahe der Route.
-  async function fetchPois(rawPath) {
-    const sph = google.maps.geometry.spherical;
-    const pts = [rawPath[0]]; let acc = 0;
-    for (let i = 1; i < rawPath.length; i++) {
-      acc += sph.computeDistanceBetween(rawPath[i - 1], rawPath[i]);
-      if (acc >= 3000) { pts.push(rawPath[i]); acc = 0; }
-    }
-    const last = rawPath[rawPath.length - 1];
-    if (pts[pts.length - 1] !== last) pts.push(last);
-    const coords = pts.slice(0, 120).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
+  // Nur „ganz Besonderes": POIs mit wikidata-Tag (= enzyklopädie-würdig) nahe den Punkten.
+  async function fetchPoisForPoints(pts) {
+    const coords = pts.slice(0, 60).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
+    if (!coords) return [];
     const q = `[out:json][timeout:25];(` +
       `node(around:1200,${coords})[tourism][wikidata];` +
       `node(around:1200,${coords})[historic][wikidata];` +
@@ -489,6 +482,32 @@
       return null;
     };
 
+    // POIs LAZY laden: immer ~30 km voraus, in kleinen Overpass-Abfragen (schneller/robuster)
+    const cum = [0];
+    for (let i = 1; i < rawPath.length; i++) cum[i] = cum[i - 1] + sph.computeDistanceBetween(rawPath[i - 1], rawPath[i]);
+    let poiFetchedM = 0, poiFetching = false, walkedM = 0;
+    const corridorPoints = (fromM, toM) => {
+      const out = []; let lastM = -1e9;
+      for (let i = 0; i < rawPath.length; i++) {
+        if (cum[i] < fromM || cum[i] > toM) continue;
+        if (cum[i] - lastM >= 3000) { out.push(rawPath[i]); lastM = cum[i]; }
+      }
+      return out;
+    };
+    async function maybePrefetchPois() {
+      if (!poiMode || poiFetching || walkedM + 5000 < poiFetchedM) return;
+      poiFetching = true;
+      const from = poiFetchedM; poiFetchedM += 30000; // 30-km-Chunk, direkt reservieren
+      try {
+        const chunk = corridorPoints(from, poiFetchedM);
+        if (chunk.length) {
+          const found = await fetchPoisForPoints(chunk);
+          for (const p of found) if (!pois.some((x) => x.name === p.name)) pois.push(p);
+        }
+      } catch (e) {}
+      poiFetching = false;
+    }
+
     const pushPano = async (pt, special, rad, label) => {
       const loc = await nearestPano(pt, rad || radius);
       if (loc && !seen.has(loc.pano) && (special || onRoute(loc.latLng))) {
@@ -543,6 +562,7 @@
       let distSince = 0;
       if (!(await emit(rawPath[0]))) return;
       for (let s = 1; s < rawPath.length && myGen === gen; s++) {
+        walkedM = cum[s]; maybePrefetchPois();
         const a = rawPath[s - 1], b = rawPath[s];
         const segLen = sph.computeDistanceBetween(a, b);
         if (segLen === 0) continue;
@@ -558,24 +578,18 @@
       return;
     }
 
-    // Normal: gleichmäßig alle stepM Meter abtasten
+    // Normal: gleichmäßig alle stepM Meter abtasten (über emit → onRoute-Filter, Grenze, POI)
     let acc = 0; // zurückgelegte Strecke seit dem letzten Abtastpunkt
     for (let s = 1; s < rawPath.length && myGen === gen; s++) {
+      walkedM = cum[s]; maybePrefetchPois();
       const a = rawPath[s - 1], b = rawPath[s];
       const segLen = sph.computeDistanceBetween(a, b);
       if (segLen === 0) continue;
       let pos = 0; // schon verbrauchte Strecke auf diesem Segment
-      // Abtastpunkte alle stepM Meter ENTLANG DER GESAMTSTRECKE setzen (nicht pro Rohsegment)
       while (segLen - pos >= stepM - acc && myGen === gen) {
         pos += stepM - acc;
         acc = 0;
-        while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
-        if (myGen !== gen) return;
-        const loc = await nearestPano(sph.interpolate(a, b, pos / segLen), radius);
-        if (loc && !seen.has(loc.pano)) {
-          seen.add(loc.pano);
-          panoList.push({ pano: loc.pano, latLng: loc.latLng });
-        }
+        if (!(await emit(sph.interpolate(a, b, pos / segLen)))) return;
       }
       acc += segLen - pos; // Rest ins nächste Segment übertragen
     }
@@ -840,8 +854,7 @@
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
       const myGen = gen;
-      pois = [];
-      if ($("poi").checked) fetchPois(route.path).then((p) => { if (myGen === gen) pois = p; }).catch(() => {});
+      pois = []; // werden im Producer lazy nachgeladen (immer ein Stück voraus)
       panoList = []; consumerIdx = 0; producerDone = false;
       running = true;
       const stepM = Math.max(5, Number($("stepM").value) || 20);
