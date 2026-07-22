@@ -90,6 +90,20 @@
     display: flex; flex-direction: column; gap: 3px; }
   #miniZoom button { width: 22px; height: 22px; border: 0; border-radius: 4px;
     background: rgba(18,21,28,.9); color: #e8ecf3; font-size: 15px; line-height: 1; cursor: pointer; }
+
+  /* Favoriten-Ansicht */
+  #favBtn { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid #2a2f3a;
+    border-radius: 8px; background: #11141b; color: #e8ecf3; font-size: 13px; cursor: pointer; }
+  #favPanel { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(8,10,14,.6); }
+  #favPanel.show { display: flex; align-items: center; justify-content: center; }
+  #favPanel .box { width: 380px; max-width: calc(100vw - 24px); max-height: 72vh; overflow-y: auto;
+    background: #12151c; border: 1px solid #2a2f3a; border-radius: 12px; padding: 16px; }
+  #favPanel h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  #favClose { border: 0; background: #2a2f3a; color: #e8ecf3; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
+  .fav-row { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-top: 1px solid #22262f; }
+  .fav-row .lbl { flex: 1; font-size: 12px; color: #e8ecf3; line-height: 1.3; }
+  .fav-row button { border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 12px; padding: 5px 7px; white-space: nowrap; }
+  .fav-empty { color: #9aa4b2; font-size: 12px; }
 </style>
 
 <div id="panoA" class="stage"></div>
@@ -132,6 +146,7 @@
   </details>
 
   <button id="go">Tour starten</button>
+  <button id="favBtn">★ Favoriten</button>
   <div id="status"></div>
 
   <div class="hint">
@@ -143,6 +158,13 @@
 </div>
 
 <button id="menuToggle" title="Menü">☰</button>
+
+<div id="favPanel">
+  <div class="box">
+    <h2>★ Favoriten <button id="favClose" title="Schließen">×</button></h2>
+    <div id="favList"></div>
+  </div>
+</div>
 
 <div id="minimap">
   <div id="minimap-inner"></div>
@@ -472,18 +494,52 @@
   const FAV_KEY = "svFavorites";
   const getFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } };
   const isFav = (panoId) => getFavs().some((f) => f.pano === panoId);
-  function toggleFav() {
+  const saveFavs = (favs) => { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); refreshFav(); updateFavCount(); };
+  async function toggleFav() {
     const it = panoList[curIdx]; if (!it) return;
     const favs = getFavs(), at = favs.findIndex((f) => f.pano === it.pano);
-    if (at >= 0) favs.splice(at, 1);
-    else favs.push({ pano: it.pano, lat: it.latLng.lat(), lng: it.latLng.lng(), added: Date.now() });
-    localStorage.setItem(FAV_KEY, JSON.stringify(favs));
-    refreshFav();
+    if (at >= 0) { favs.splice(at, 1); saveFavs(favs); return; }
+    const lat = it.latLng.lat(), lng = it.latLng.lng();
+    let label = lat.toFixed(4) + ", " + lng.toFixed(4);
+    try { // Ort-Namen keyless per Photon-Reverse holen (Fallback = Koordinaten)
+      const r = await fetch(`https://photon.komoot.io/reverse?lon=${lng}&lat=${lat}`);
+      const p = (await r.json()).features?.[0]?.properties;
+      if (p) {
+        const main = p.name || [p.street, p.housenumber].filter(Boolean).join(" ") || p.city || label;
+        const ctx = [p.city, p.state, p.country].filter((x) => x && x !== main).join(", ");
+        label = main + (ctx ? ", " + ctx : "");
+      }
+    } catch (e) {}
+    favs.push({ pano: it.pano, lat, lng, label, added: Date.now() });
+    saveFavs(favs);
   }
   function refreshFav() {
     const it = panoList[curIdx];
     if (it) $("fav").classList.toggle("on", isFav(it.pano));
   }
+  const updateFavCount = () => { $("favBtn").textContent = `★ Favoriten (${getFavs().length})`; };
+  function renderFavList() {
+    const favs = getFavs(), list = $("favList");
+    if (!favs.length) { list.innerHTML = '<div class="fav-empty">Noch keine Favoriten. Im Pause-Modus mit ★ markieren.</div>'; return; }
+    list.innerHTML = "";
+    favs.slice().reverse().forEach((f) => {
+      const row = document.createElement("div"); row.className = "fav-row";
+      const lbl = document.createElement("div"); lbl.className = "lbl";
+      lbl.textContent = f.label || (f.lat.toFixed(4) + ", " + f.lng.toFixed(4));
+      const dest = document.createElement("button"); dest.textContent = "→ Ziel";
+      dest.onclick = () => { const e = $("end"); e.value = f.label || ""; e._picked = { lat: f.lat, lng: f.lng }; $("favPanel").classList.remove("show"); };
+      const open = document.createElement("button"); open.textContent = "🔗";
+      open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${f.lat},${f.lng}`, "_blank");
+      const del = document.createElement("button"); del.textContent = "×";
+      del.onclick = () => { saveFavs(getFavs().filter((x) => x.pano !== f.pano)); renderFavList(); };
+      row.append(lbl, dest, open, del);
+      list.appendChild(row);
+    });
+  }
+  $("favBtn").addEventListener("click", () => { renderFavList(); $("favPanel").classList.add("show"); });
+  $("favClose").addEventListener("click", () => $("favPanel").classList.remove("show"));
+  $("favPanel").addEventListener("click", (e) => { if (e.target === $("favPanel")) $("favPanel").classList.remove("show"); });
+  updateFavCount();
 
   // Aktuelle Stelle im echten Google Maps / Street View öffnen
   function openInMaps() {
