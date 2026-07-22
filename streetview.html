@@ -528,13 +528,27 @@
       poiFetching = false;
     }
 
-    const pushPano = async (pt, special, rad, label) => {
+    const pushPano = async (pt, special, rad, label, distM) => {
       const loc = await nearestPano(pt, rad || radius);
       if (loc && !seen.has(loc.pano) && (special || onRoute(loc.latLng))) {
         seen.add(loc.pano);
-        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null });
+        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null, distM });
       }
     };
+
+    // Grenz-Stopp an der KORREKTEN Position einfügen (nach Streckendistanz), nicht
+    // hinten anhängen — sonst erscheint er erst nach schon gezeigten Stopps dahinter.
+    async function insertBorder(crossM, label) {
+      const loc = await nearestPano(pointAtDistance(crossM), 150);
+      if (!loc || seen.has(loc.pano)) return;
+      seen.add(loc.pano);
+      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM };
+      let idx = panoList.length;
+      for (let k = Math.max(consumerIdx + 1, 0); k < panoList.length; k++) {
+        if (panoList[k].distM != null && panoList[k].distM > crossM) { idx = k; break; }
+      }
+      panoList.splice(idx, 0, entry);
+    }
 
     // Grenzerkennung: alle ~7 km den Staat prüfen; bei Wechsel (nur USA/Kanada)
     // die Grenze per Binärsuche ENTLANG DER ROUTE einkreisen (nicht Luftlinie) und
@@ -552,8 +566,7 @@
             (await stateOf(pointAtDistance(mid))) === curState ? (lo = mid) : (hi = mid);
           }
           const s2 = await stateOf(pointAtDistance(hi + 200));
-          await pushPano(pointAtDistance(hi), true, 150,
-            "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // ~15 m genau auf der Straße
+          await insertBorder(hi, "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // an richtiger Position
         }
         curState = st;
       }
@@ -561,12 +574,12 @@
     }
 
     // ein Punkt → (optional Grenze prüfen) → nächstes Panorama suchen und anhängen
-    const emit = async (pt) => {
+    const emit = async (pt, distM) => {
       while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
       if (myGen !== gen) return false;
       if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
       const poi = poiMode ? nearbyPoi(pt) : null;
-      await pushPano(pt, !!poi, poi ? 500 : undefined, poi ? poi.name : undefined);
+      await pushPano(pt, !!poi, poi ? 500 : undefined, poi ? poi.name : undefined, distM);
       return true;
     };
 
@@ -579,7 +592,7 @@
       // ENTLANG der echten Straßen-Geometrie laufen: Halt an jeder Kreuzung, sonst
       // spätestens alle maxJump Meter — die Zwischenpunkte liegen so immer auf der Straße.
       let distSince = 0;
-      if (!(await emit(rawPath[0]))) return;
+      if (!(await emit(rawPath[0], 0))) return;
       for (let s = 1; s < rawPath.length && myGen === gen; s++) {
         walkedM = cum[s]; maybePrefetchPois();
         const a = rawPath[s - 1], b = rawPath[s];
@@ -588,10 +601,10 @@
         let pos = 0;
         while (segLen - pos >= maxJump - distSince && myGen === gen) {
           pos += maxJump - distSince; distSince = 0;
-          if (!(await emit(sph.interpolate(a, b, pos / segLen)))) return;
+          if (!(await emit(sph.interpolate(a, b, pos / segLen), cum[s - 1] + pos))) return;
         }
         distSince += segLen - pos;
-        if (isX.has(keyOf(b))) { distSince = 0; if (!(await emit(b))) return; }
+        if (isX.has(keyOf(b))) { distSince = 0; if (!(await emit(b, cum[s]))) return; }
       }
       if (myGen === gen) producerDone = true;
       return;
@@ -608,7 +621,7 @@
       while (segLen - pos >= stepM - acc && myGen === gen) {
         pos += stepM - acc;
         acc = 0;
-        if (!(await emit(sph.interpolate(a, b, pos / segLen)))) return;
+        if (!(await emit(sph.interpolate(a, b, pos / segLen), cum[s - 1] + pos))) return;
       }
       acc += segLen - pos; // Rest ins nächste Segment übertragen
     }
