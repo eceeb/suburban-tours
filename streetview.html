@@ -118,9 +118,9 @@
   <label>Google Maps API-Key</label>
   <input id="key" type="password" placeholder="AIza…" autocomplete="off" />
   <label>Start</label>
-  <div class="ac-wrap"><input id="start" autocomplete="off" value="Freiburg Münster" /><div class="ac-list" id="ac-start"></div></div>
+  <div class="ac-wrap"><input id="start" autocomplete="off" value="Boulder, Colorado, Vereinigte Staaten von Amerika" /><div class="ac-list" id="ac-start"></div></div>
   <label>Ziel</label>
-  <div class="ac-wrap"><input id="end" autocomplete="off" value="Freiburg Hauptbahnhof" /><div class="ac-list" id="ac-end"></div></div>
+  <div class="ac-wrap"><input id="end" autocomplete="off" value="Salt Lake City, Utah, Vereinigte Staaten von Amerika" /><div class="ac-list" id="ac-end"></div></div>
 
   <details>
     <summary>Einstellungen</summary>
@@ -130,7 +130,7 @@
       <div><label>Snap-Radius (m)</label><input id="radius" type="number" value="60" /></div>
     </div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
-      <input type="checkbox" id="fx" checked style="width:auto;" /> weiche Übergänge (Zoom)
+      <input type="checkbox" id="fx" style="width:auto;" /> weiche Übergänge (Zoom)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
       <input type="checkbox" id="navi" checked style="width:auto;" /> Navi-Modus (Kreuzung zu Kreuzung)
@@ -140,10 +140,10 @@
       <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
-      <input type="checkbox" id="poi" style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
+      <input type="checkbox" id="poi" checked style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
-      <input type="checkbox" id="avoidHw" style="width:auto;" /> Autobahnen meiden
+      <input type="checkbox" id="avoidHw" checked style="width:auto;" /> Autobahnen meiden
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:6px;color:#e8ecf3;">
       <input type="checkbox" id="avoidToll" style="width:auto;" /> Maut meiden
@@ -364,11 +364,14 @@
       avoidHighways: avoid.avoidHighways, avoidTolls: avoid.avoidTolls, avoidFerries: avoid.avoidFerries,
     });
     const route = res.routes[0];
-    const path = route.overview_path.slice();
-    // Navi-Punkte: Manöver-/Step-Grenzen (gröber als OSRM, aber Google liefert keine Kreuzungsliste)
-    const waypoints = [];
+    // Dichte Geometrie aus den Step-Pfaden (nicht overview_path — der ist zu grob
+    // vereinfacht, dann verwirft der On-Route-Filter auf kurvigen Straßen zu viel).
+    const path = [], waypoints = [];
     for (const leg of route.legs) {
-      for (const step of leg.steps) waypoints.push(step.start_location);
+      for (const step of leg.steps) {
+        waypoints.push(step.start_location);
+        for (const p of step.path) path.push(p);
+      }
       waypoints.push(leg.end_location);
     }
     return { path, waypoints };
