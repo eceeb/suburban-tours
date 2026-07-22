@@ -412,9 +412,14 @@
     const borderMode = $("border").checked;
     let stateChkPt = null, curState = null, stateAcc = 0, borderActive = true;
 
+    // Nur Panoramen akzeptieren, die AUF der Route liegen — verhindert Sprünge auf
+    // Parallel-/Querstraßen (getPanorama schnappt sonst aufs global nächste Panorama).
+    const routePoly = new google.maps.Polyline({ path: rawPath });
+    const onRoute = (ll) => google.maps.geometry.poly.isLocationOnEdge(ll, routePoly, 0.0004); // ~44 m
+
     const pushPano = async (pt, isBorder, rad) => {
       const loc = await nearestPano(pt, rad || radius);
-      if (loc && !seen.has(loc.pano)) {
+      if (loc && !seen.has(loc.pano) && (isBorder || onRoute(loc.latLng))) {
         seen.add(loc.pano);
         panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!isBorder });
       }
