@@ -1,0 +1,313 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Suburban Tours — 3D Street Tour</title>
+
+<link
+  href="https://cdn.jsdelivr.net/npm/cesium@1.126/Build/Cesium/Widgets/widgets.css"
+  rel="stylesheet"
+/>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.126/Build/Cesium/Cesium.js"></script>
+
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: #0b0d12; }
+  #cesium { position: fixed; inset: 0; }
+
+  #panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 10;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    background: rgba(18, 21, 28, 0.92);
+    border: 1px solid #2a2f3a;
+    border-radius: 12px;
+    padding: 14px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  }
+  #panel h1 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+  #panel label { display: block; font-size: 11px; color: #9aa4b2; margin: 8px 0 3px; }
+  #panel input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 9px;
+    background: #11141b;
+    border: 1px solid #2a2f3a;
+    border-radius: 8px;
+    color: #e8ecf3;
+    font-size: 13px;
+  }
+  #panel input:focus { outline: none; border-color: #4c7dff; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  #go {
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px;
+    border: 0;
+    border-radius: 8px;
+    background: #4c7dff;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #go:disabled { opacity: 0.5; cursor: default; }
+  #status { margin-top: 10px; font-size: 12px; color: #9aa4b2; min-height: 16px; line-height: 1.4; }
+  #status.err { color: #ff8080; }
+  .hint { font-size: 11px; color: #6b7280; margin-top: 10px; line-height: 1.4; }
+  .hint a { color: #7aa0ff; }
+  details { margin-top: 8px; }
+  summary { font-size: 12px; color: #9aa4b2; cursor: pointer; }
+  .settings { display: flex; gap: 8px; margin-top: 8px; }
+  .settings > div { flex: 1; }
+</style>
+
+<div id="cesium"></div>
+
+<div id="panel">
+  <h1>🚗 Suburban Tours</h1>
+
+  <label>Google Maps API-Key</label>
+  <input id="key" type="password" placeholder="AIza…" autocomplete="off" />
+
+  <label>Start</label>
+  <input id="start" placeholder="z.B. Freiburg Münster" />
+
+  <label>Ziel</label>
+  <input id="end" placeholder="z.B. Freiburg Hauptbahnhof" />
+
+  <details>
+    <summary>Kamera-Einstellungen</summary>
+    <div class="settings">
+      <div>
+        <label>Höhe (m)</label>
+        <input id="camHeight" type="number" value="28" />
+      </div>
+      <div>
+        <label>Neigung (°)</label>
+        <input id="camPitch" type="number" value="-18" />
+      </div>
+      <div>
+        <label>km/h</label>
+        <input id="camSpeed" type="number" value="55" />
+      </div>
+    </div>
+  </details>
+
+  <button id="go">Tour starten</button>
+  <div id="status"></div>
+
+  <div class="hint">
+    Key braucht aktiviert:<br />
+    Maps JavaScript API · Directions API · Map Tiles API.<br />
+    <a href="https://console.cloud.google.com/google/maps-apis/api-list" target="_blank"
+      >APIs aktivieren →</a
+    >
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  const setStatus = (msg, isErr = false) => {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? "err" : "";
+  };
+
+  // Key aus localStorage vorbefüllen (bequem beim Neuladen)
+  $("key").value = localStorage.getItem("gmapsKey") || "";
+
+  let viewer, tileset, mapsLoaded = false, tickHandler = null;
+
+  function loadGoogleMaps(key) {
+    if (mapsLoaded) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src =
+        "https://maps.googleapis.com/maps/api/js?key=" +
+        encodeURIComponent(key) +
+        "&libraries=geometry&loading=async";
+      s.async = true;
+      s.onload = () => { mapsLoaded = true; resolve(); };
+      s.onerror = () => reject(new Error("Google Maps JS API konnte nicht laden — Key/APIs prüfen."));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function initCesium(key) {
+    if (viewer && tileset) return;
+    viewer = new Cesium.Viewer("cesium", {
+      timeline: false,
+      animation: false,
+      baseLayerPicker: false,
+      geocoder: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      fullscreenButton: false,
+      infoBox: false,
+      selectionIndicator: false,
+    });
+    viewer.scene.globe.show = false; // nur die 3D-Tiles zeigen, keine blaue Kugel darunter
+    viewer.scene.skyAtmosphere.show = true;
+
+    tileset = await Cesium.createGooglePhotorealistic3DTileset({
+      key,
+      onlyUsingWithGoogleGeocoder: true,
+    });
+    viewer.scene.primitives.add(tileset);
+  }
+
+  async function geocode(geocoder, address) {
+    const res = await geocoder.geocode({ address });
+    if (!res.results.length) throw new Error("Nicht gefunden: " + address);
+    const loc = res.results[0].geometry.location;
+    return { lat: loc.lat(), lng: loc.lng() };
+  }
+
+  // Dichten Pfad aus allen Step-Pfaden zusammensetzen (feiner als overview_path)
+  async function routePath(origin, destination) {
+    const ds = new google.maps.DirectionsService();
+    const res = await ds.route({
+      origin,
+      destination,
+      travelMode: google.maps.TravelMode.DRIVING,
+    });
+    const route = res.routes[0];
+    const pts = [];
+    for (const leg of route.legs)
+      for (const step of leg.steps)
+        for (const p of step.path) pts.push(p); // google.maps.LatLng
+    // Duplikate an Step-Grenzen entfernen
+    return pts.filter((p, i) => i === 0 || !p.equals(pts[i - 1]));
+  }
+
+  // kumulierte Distanzen für konstante Geschwindigkeit
+  function buildTrack(latLngs) {
+    const sph = google.maps.geometry.spherical;
+    const dist = [0];
+    for (let i = 1; i < latLngs.length; i++)
+      dist.push(dist[i - 1] + sph.computeDistanceBetween(latLngs[i - 1], latLngs[i]));
+    return { pts: latLngs, dist, total: dist[dist.length - 1] };
+  }
+
+  // Position + Fahrtrichtung an zurückgelegter Strecke d
+  function sampleTrack(track, d) {
+    const { pts, dist } = track;
+    const sph = google.maps.geometry.spherical;
+    let i = 1;
+    while (i < dist.length && dist[i] < d) i++;
+    if (i >= pts.length) i = pts.length - 1;
+    const a = pts[i - 1], b = pts[i];
+    const segLen = dist[i] - dist[i - 1] || 1;
+    const f = Math.min(1, Math.max(0, (d - dist[i - 1]) / segLen));
+    const pos = sph.interpolate(a, b, f);
+    const heading = sph.computeHeading(a, b); // Grad, 0 = Nord
+    return { lat: pos.lat(), lng: pos.lng(), heading };
+  }
+
+  function sampleGround(lng, lat, fallback) {
+    if (!viewer.scene.sampleHeightSupported) return fallback;
+    const h = viewer.scene.sampleHeight(Cesium.Cartographic.fromDegrees(lng, lat));
+    return h == null ? fallback : h;
+  }
+
+  async function flyTour(track) {
+    const camHeight = Number($("camHeight").value) || 28;
+    const pitch = Cesium.Math.toRadians(Number($("camPitch").value) || -18);
+    const speed = Math.max(5, Number($("camSpeed").value) || 55) / 3.6; // m/s
+
+    const start = sampleTrack(track, 0);
+
+    // Erst zum Start fliegen, damit die Tiles dort laden
+    setStatus("Fliege zum Start…");
+    await new Promise((resolve) => {
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(start.lng, start.lat, 350),
+        orientation: {
+          heading: Cesium.Math.toRadians(start.heading),
+          pitch: Cesium.Math.toRadians(-35),
+        },
+        duration: 2.5,
+        complete: resolve,
+      });
+    });
+
+    // Detaillierte Grundhöhe am Start holen (Basis-Fallback)
+    let baseGround = 0;
+    try {
+      const s = await viewer.scene.sampleHeightMostDetailed([
+        Cesium.Cartographic.fromDegrees(start.lng, start.lat),
+      ]);
+      if (s[0] && s[0].height != null) baseGround = s[0].height;
+    } catch (_) {}
+
+    setStatus("Tour läuft… ▶");
+    const totalTime = track.total / speed;
+    const t0 = performance.now();
+    let lastGround = baseGround;
+
+    return new Promise((resolve) => {
+      if (tickHandler) viewer.clock.onTick.removeEventListener(tickHandler);
+      tickHandler = () => {
+        const elapsed = (performance.now() - t0) / 1000;
+        const f = Math.min(1, elapsed / totalTime);
+        const d = f * track.total;
+        const s = sampleTrack(track, d);
+
+        lastGround = sampleGround(s.lng, s.lat, lastGround);
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(s.lng, s.lat, lastGround + camHeight),
+          orientation: { heading: Cesium.Math.toRadians(s.heading), pitch, roll: 0 },
+        });
+
+        if (f >= 1) {
+          viewer.clock.onTick.removeEventListener(tickHandler);
+          tickHandler = null;
+          setStatus("Angekommen 🏁");
+          resolve();
+        }
+      };
+      viewer.clock.onTick.addEventListener(tickHandler);
+    });
+  }
+
+  $("go").addEventListener("click", async () => {
+    const key = $("key").value.trim();
+    const startAddr = $("start").value.trim();
+    const endAddr = $("end").value.trim();
+    if (!key) return setStatus("Bitte API-Key eingeben.", true);
+    if (!startAddr || !endAddr) return setStatus("Start und Ziel eingeben.", true);
+    localStorage.setItem("gmapsKey", key);
+
+    $("go").disabled = true;
+    try {
+      setStatus("Lade Google Maps…");
+      await loadGoogleMaps(key);
+
+      setStatus("Lade 3D-Tiles…");
+      await initCesium(key);
+
+      setStatus("Suche Adressen & Route…");
+      const geocoder = new google.maps.Geocoder();
+      const origin = await geocode(geocoder, startAddr);
+      const destination = await geocode(geocoder, endAddr);
+      const pts = await routePath(origin, destination);
+      if (pts.length < 2) throw new Error("Keine Route gefunden.");
+
+      const track = buildTrack(pts);
+      await flyTour(track);
+    } catch (e) {
+      console.error(e);
+      setStatus(e.message || String(e), true);
+    } finally {
+      $("go").disabled = false;
+    }
+  });
+</script>
