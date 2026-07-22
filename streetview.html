@@ -432,16 +432,19 @@
       `node(around:1200,${coords})[historic][wikidata];` +
       `node(around:1200,${coords})[boundary=national_park][wikidata];` +
       `way(around:1200,${coords})[tourism][wikidata];` +
-      `);out center 60;`;
+      `node(around:5000,${coords})[place~"^(city|town)$"];` + // Städte/Orte → POIs in der Nähe überspringen
+      `);out center 90;`;
     const j = await overpassQuery(q);
     if (!j) return [];
     const seen = new Set(), out = [];
     for (const e of j.elements) {
-      const name = e.tags && e.tags.name;
+      const t = e.tags || {};
       const lat = e.lat != null ? e.lat : e.center && e.center.lat;
       const lng = e.lon != null ? e.lon : e.center && e.center.lon;
-      if (!name || lat == null || seen.has(name)) continue;
-      seen.add(name); out.push({ lat, lng, name });
+      if (lat == null) continue;
+      if (/^(city|town)$/.test(t.place || "")) { cities.push({ lat, lng }); continue; }
+      if (!t.name || seen.has(t.name)) continue;
+      seen.add(t.name); out.push({ lat, lng, name: t.name });
     }
     return out;
   }
@@ -450,7 +453,7 @@
   // nicht die ganze Route vorab. So startet es sofort, und eine lange Route
   // kostet nur so viel API, wie man tatsächlich abfährt.
   const BUFFER = 5;
-  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [];
+  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [], cities = [];
 
   // Bundesstaat/Provinz an einem Punkt (keyless via Photon) → "US|Colorado"
   async function stateOf(latLng) {
@@ -473,11 +476,17 @@
     const routePoly = new google.maps.Polyline({ path: rawPath });
     const onRoute = (ll) => google.maps.geometry.poly.isLocationOnEdge(ll, routePoly, 0.0004); // ~44 m
 
-    // Nächste noch nicht besuchte Sehenswürdigkeit in Reichweite (aus der Overpass-Liste)
+    // in einer Stadt/Ortschaft? (dann keine POI-Stopps — sonst zu viele)
+    const inCity = (ll) => cities.some((c) => sph.computeDistanceBetween(ll, new google.maps.LatLng(c.lat, c.lng)) < 4000);
+    // Nächste noch nicht besuchte Sehenswürdigkeit in Reichweite, aber nicht in einer Stadt
     const nearbyPoi = (pt) => {
       for (const p of pois) {
         if (p.used) continue;
-        if (sph.computeDistanceBetween(pt, new google.maps.LatLng(p.lat, p.lng)) < 500) { p.used = true; return p; }
+        const ll = new google.maps.LatLng(p.lat, p.lng);
+        if (sph.computeDistanceBetween(pt, ll) < 500) {
+          p.used = true;
+          return inCity(ll) ? null : p; // in Stadt → überspringen
+        }
       }
       return null;
     };
@@ -854,7 +863,7 @@
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
       const myGen = gen;
-      pois = []; // werden im Producer lazy nachgeladen (immer ein Stück voraus)
+      pois = []; cities = []; // werden im Producer lazy nachgeladen (immer ein Stück voraus)
       panoList = []; consumerIdx = 0; producerDone = false;
       running = true;
       const stepM = Math.max(5, Number($("stepM").value) || 20);
