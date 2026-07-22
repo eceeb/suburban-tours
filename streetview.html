@@ -5,8 +5,7 @@
 <style>
   :root { color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; }
   html, body { margin: 0; height: 100%; background: #0b0d12; }
-  .stage { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    opacity: 1; transition: opacity 350ms ease; }
+  .stage { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
   #panel {
     position: fixed; top: 12px; left: 12px; z-index: 10; width: 300px;
     max-width: calc(100vw - 24px);
@@ -64,7 +63,6 @@
 </style>
 
 <div id="panoA" class="stage"></div>
-<div id="panoB" class="stage"></div>
 
 <div id="panel">
   <h1>🛣️ Suburban Tours — Street View</h1>
@@ -90,6 +88,16 @@
       <input type="checkbox" id="navi" style="width:auto;" /> Navi-Modus (Kreuzung zu Kreuzung)
     </label>
     <div style="margin-top:8px;"><label>Navi: max Sprung (km)</label><input id="maxjump" type="number" value="10" /></div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
+      <input type="checkbox" id="avoidHw" style="width:auto;" /> Autobahnen meiden
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:6px;color:#e8ecf3;">
+      <input type="checkbox" id="avoidToll" style="width:auto;" /> Maut meiden
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:6px;color:#e8ecf3;">
+      <input type="checkbox" id="avoidFerry" style="width:auto;" /> Fähren meiden
+    </label>
+    <div style="font-size:10px;color:#6b7280;margin-top:4px;">Meide-Optionen nutzen Google (Directions API nötig)</div>
   </details>
 
   <button id="go">Tour starten</button>
@@ -145,7 +153,7 @@
   }
   renderUsage();
 
-  let mapsLoaded = false, panoA, panoB, svService, miniMap, miniMarker;
+  let mapsLoaded = false, panoA, svService, miniMap, miniMarker;
 
   // Googles offizieller Bootstrap-Loader — stellt google.maps.importLibrary bereit
   function bootstrapGoogleMaps(key) {
@@ -193,8 +201,46 @@
     return new google.maps.LatLng(+j[0].lat, +j[0].lon);
   }
 
-  // Keyless Routing via OSRM — liefert dichten Fahr-Pfad + Manöverpunkte (Kreuzungen/Ausfahrten)
+  // Router-Auswahl: ohne Meide-Option keyless über OSRM; mit Meide-Option über Google
+  // (Directions API). Fällt bei Fehler (API nicht aktiv) sauber auf OSRM zurück.
   async function routePath(origin, destination) {
+    const avoid = {
+      avoidHighways: $("avoidHw").checked,
+      avoidTolls: $("avoidToll").checked,
+      avoidFerries: $("avoidFerry").checked,
+    };
+    if (avoid.avoidHighways || avoid.avoidTolls || avoid.avoidFerries) {
+      try { return await googleRoute(origin, destination, avoid); }
+      catch (e) {
+        console.warn("Google-Routing fehlgeschlagen, nutze OSRM:", e.message || e);
+        setStatus("Meide-Option braucht Directions API — nutze Normalroute", true);
+        await sleep(1500);
+      }
+    }
+    return await osrmRoute(origin, destination);
+  }
+
+  // Google DirectionsService — kann Autobahnen/Maut/Fähren meiden (echte befahrbare Straßen)
+  async function googleRoute(origin, destination, avoid) {
+    await google.maps.importLibrary("routes");
+    const ds = new google.maps.DirectionsService();
+    const res = await ds.route({
+      origin, destination, travelMode: google.maps.TravelMode.DRIVING,
+      avoidHighways: avoid.avoidHighways, avoidTolls: avoid.avoidTolls, avoidFerries: avoid.avoidFerries,
+    });
+    const route = res.routes[0];
+    const path = route.overview_path.slice();
+    // Navi-Punkte: Manöver-/Step-Grenzen (gröber als OSRM, aber Google liefert keine Kreuzungsliste)
+    const waypoints = [];
+    for (const leg of route.legs) {
+      for (const step of leg.steps) waypoints.push(step.start_location);
+      waypoints.push(leg.end_location);
+    }
+    return { path, waypoints };
+  }
+
+  // Keyless Routing via OSRM — dichter Fahr-Pfad + alle Kreuzungen/Knoten
+  async function osrmRoute(origin, destination) {
     const url = "https://router.project-osrm.org/route/v1/driving/" +
       `${origin.lng()},${origin.lat()};${destination.lng()},${destination.lat()}` +
       "?overview=full&geometries=geojson&steps=true";
@@ -299,7 +345,6 @@
     let d = ((b - a + 540) % 360) - 180;
     return a + d * f;
   }
-  const easeInOut = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
   let paused = false, running = false, needResync = false;
   // Verweildauer pro Panorama (ms) — Quelle ist das Feld, Regler schreibt hinein
@@ -318,23 +363,6 @@
     $("pause").textContent = p ? "▶" : "⏸";
   }
 
-  // Startzustand: beide Ebenen deckend (laden beide), gewählte oben
-  function initLayers(frontPano) {
-    const a = frontPano === panoA;
-    $("panoA").style.zIndex = a ? 2 : 1; $("panoA").style.opacity = 1;
-    $("panoB").style.zIndex = a ? 1 : 2; $("panoB").style.opacity = 1;
-  }
-  // Weiche Blende: neuen Viewer oben transparent starten und einblenden;
-  // der alte bleibt darunter sichtbar → nie Schwarz dazwischen.
-  function fadeToFront(frontPano) {
-    const nf = frontPano === panoA ? $("panoA") : $("panoB");
-    const of = frontPano === panoA ? $("panoB") : $("panoA");
-    of.style.zIndex = 1;
-    nf.style.zIndex = 2;
-    nf.style.opacity = 0;
-    void nf.offsetWidth; // Reflow erzwingen, damit die Transition greift
-    nf.style.opacity = 1;
-  }
   const sph = () => google.maps.geometry.spherical;
   // Fahrtrichtung an Panorama i = Peilung zum nächsten (bzw. vom vorherigen am Ende)
   function headingAt(i) {
@@ -344,13 +372,6 @@
   }
   const distAt = (i) => panoList[i + 1]
     ? sph().computeDistanceBetween(panoList[i].latLng, panoList[i + 1].latLng) : 12;
-
-  function showPano(pano, idx) {
-    const it = panoList[idx];
-    if (!it) return;
-    pano.setPano(it.pano);
-    pano.setPov({ heading: headingAt(idx), pitch: 0, zoom: 0 });
-  }
 
   function updateMini(idx) {
     const it = panoList[idx];
@@ -365,7 +386,6 @@
     running = true;
     setPause(false);
     $("controls").classList.add("show");
-    $("panoB").style.display = "none";
     $("panoA").style.opacity = 1; $("panoA").style.zIndex = 1;
 
     const pano = panoA;
@@ -457,7 +477,6 @@
           disableDefaultUI: true, clickToGo: false, scrollwheel: true, // Mausrad-Zoom (v.a. im Pause-Modus)
         };
         panoA = new google.maps.StreetViewPanorama($("panoA"), opts);
-        panoB = new google.maps.StreetViewPanorama($("panoB"), opts);
         svService = new google.maps.StreetViewService();
       }
       setStatus("Suche Adressen & Route…");
