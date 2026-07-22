@@ -452,6 +452,24 @@
     return out;
   }
 
+  // Kreuzungen größerer Straßen (Knoten, die in ≥2 solcher Wege vorkommen) — nur nötig,
+  // wenn über Google geroutet wird (Autobahn meiden), da Google keine Kreuzungsliste gibt.
+  async function fetchJunctionsForPoints(pts) {
+    const coords = pts.slice(0, 40).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
+    if (!coords) return [];
+    const q = `[out:json][timeout:25];` +
+      `way(around:150,${coords})[highway~"^(trunk|primary|secondary|tertiary|trunk_link|primary_link)$"];` +
+      `out tags;(._;>;);out skel;`;
+    const j = await overpassQuery(q);
+    if (!j) return [];
+    const nodes = {}, cnt = {};
+    for (const e of j.elements) if (e.type === "node") nodes[e.id] = e;
+    for (const e of j.elements) if (e.type === "way" && e.nodes) for (const id of e.nodes) cnt[id] = (cnt[id] || 0) + 1;
+    const out = [];
+    for (const id in cnt) if (cnt[id] >= 2 && nodes[id]) out.push({ lat: nodes[id].lat, lng: nodes[id].lon });
+    return out;
+  }
+
   // Panoramen werden LAZY entlang der Route gesucht — immer nur ein paar voraus,
   // nicht die ganze Route vorab. So startet es sofort, und eine lange Route
   // kostet nur so viel API, wie man tatsächlich abfährt.
@@ -493,6 +511,8 @@
     const seen = new Set();
     const borderMode = $("border").checked;
     const poiMode = $("poi").checked;
+    const junctionMode = !!naviPoints && $("avoidHw").checked; // Google-Route hat keine Kreuzungen
+    const stopIdx = new Set(); // Route-Vertizes, an denen gehalten wird (Manöver + Kreuzungen)
     let lastChkM = -1, curState = null;
     if (borderMode) await loadStateBoundaries(); // einmal die Grenz-Polygone laden
 
@@ -536,15 +556,31 @@
       }
       return out;
     };
-    async function maybePrefetchPois() {
-      if (!poiMode || poiFetching || walkedM + 5000 < poiFetchedM) return;
+    // gefundene Kreuzung aufs nächstgelegene Routen-Vertex (im Chunk) abbilden → Halt dort
+    const addJunctionsToStops = (jns, fromM, toM) => {
+      for (const jn of jns) {
+        const jl = new google.maps.LatLng(jn.lat, jn.lng);
+        let best = -1, bestD = Infinity;
+        for (let i = 1; i < rawPath.length; i++) {
+          if (cum[i] < fromM || cum[i] > toM) continue;
+          const d = sph.computeDistanceBetween(jl, rawPath[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+        if (best >= 0 && bestD < 60) stopIdx.add(best);
+      }
+    };
+    async function maybePrefetch() {
+      if ((!poiMode && !junctionMode) || poiFetching || walkedM + 5000 < poiFetchedM) return;
       poiFetching = true;
       const from = poiFetchedM; poiFetchedM += 30000; // 30-km-Chunk, direkt reservieren
       try {
         const chunk = corridorPoints(from, poiFetchedM);
         if (chunk.length) {
-          const found = await fetchPoisForPoints(chunk);
-          for (const p of found) if (!pois.some((x) => x.name === p.name)) pois.push(p);
+          if (poiMode) {
+            const found = await fetchPoisForPoints(chunk);
+            for (const p of found) if (!pois.some((x) => x.name === p.name)) pois.push(p);
+          }
+          if (junctionMode) addJunctionsToStops(await fetchJunctionsForPoints(chunk), from, poiFetchedM);
         }
       } catch (e) {}
       poiFetching = false;
@@ -603,23 +639,23 @@
     // (auf der Autobahn ohne Ausfahrt gibt's dann alle ~10 km einen Zwischenstopp)
     if (naviPoints) {
       const maxJump = Math.max(500, (Number($("maxjump").value) || 10) * 1000);
-      // Jeden Navi-Punkt (Kreuzung/Manöver) aufs nächstgelegene Routen-Segment abbilden —
-      // robust gegen minimale Koordinaten-Abweichungen (sonst wird ein Halt verpasst).
-      const maneuverIdx = new Set();
+      // Jeden Navi-Punkt (Manöver/Kreuzung) aufs nächstgelegene Routen-Segment abbilden —
+      // robust gegen minimale Koordinaten-Abweichungen. Overpass-Kreuzungen kommen später
+      // lazy dazu (bei Autobahn-meiden), ebenfalls in stopIdx.
       for (const w of naviPoints) {
         let best = -1, bestD = Infinity;
         for (let i = 1; i < rawPath.length; i++) {
           const d = sph.computeDistanceBetween(w, rawPath[i]);
           if (d < bestD) { bestD = d; best = i; }
         }
-        if (best >= 0 && bestD < 40) maneuverIdx.add(best);
+        if (best >= 0 && bestD < 40) stopIdx.add(best);
       }
       // ENTLANG der echten Straßen-Geometrie laufen: Halt an jeder Kreuzung, sonst
       // spätestens alle maxJump Meter — die Zwischenpunkte liegen so immer auf der Straße.
       let distSince = 0;
       if (!(await emit(rawPath[0], 0))) return;
       for (let s = 1; s < rawPath.length && myGen === gen; s++) {
-        walkedM = cum[s]; maybePrefetchPois();
+        walkedM = cum[s]; maybePrefetch();
         const a = rawPath[s - 1], b = rawPath[s];
         const segLen = sph.computeDistanceBetween(a, b);
         if (segLen === 0) continue;
@@ -629,7 +665,7 @@
           if (!(await emit(sph.interpolate(a, b, pos / segLen), cum[s - 1] + pos))) return;
         }
         distSince += segLen - pos;
-        if (maneuverIdx.has(s)) { distSince = 0; if (!(await emit(b, cum[s]))) return; }
+        if (stopIdx.has(s)) { distSince = 0; if (!(await emit(b, cum[s]))) return; }
       }
       if (myGen === gen) producerDone = true;
       return;
@@ -638,7 +674,7 @@
     // Normal: gleichmäßig alle stepM Meter abtasten (über emit → onRoute-Filter, Grenze, POI)
     let acc = 0; // zurückgelegte Strecke seit dem letzten Abtastpunkt
     for (let s = 1; s < rawPath.length && myGen === gen; s++) {
-      walkedM = cum[s]; maybePrefetchPois();
+      walkedM = cum[s]; maybePrefetch();
       const a = rawPath[s - 1], b = rawPath[s];
       const segLen = sph.computeDistanceBetween(a, b);
       if (segLen === 0) continue;
