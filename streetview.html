@@ -142,6 +142,9 @@
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
       <input type="checkbox" id="poi" checked style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
     </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
+      <input type="checkbox" id="scenic" checked style="width:auto;" /> Scenic Byways anzeigen (OSM, unzuverlässig)
+    </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
       <input type="checkbox" id="avoidHw" checked style="width:auto;" /> Autobahnen meiden
     </label>
@@ -470,11 +473,34 @@
     return out;
   }
 
+  // Scenic Byways aus OSM: Routen-Relationen (route=road) mit „Byway"/„Scenic" im Namen
+  // liegen in OSM als Geometrie vor. Wir holen sie im Korridor und liefern je Weg-Segment
+  // einen Pfad + den Byway-Namen zurück → damit lässt sich erkennen, wann die Route auf
+  // einer Byway läuft (kein echtes scenic-Routing, nur Anzeige).
+  async function fetchScenicForPoints(pts) {
+    const coords = pts.slice(0, 40).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
+    if (!coords) return [];
+    const q = `[out:json][timeout:25];relation(around:1500,${coords})[route=road][name~"Byway|Scenic",i];out geom 60;`;
+    const j = await overpassQuery(q);
+    if (!j) return [];
+    const out = [];
+    for (const e of j.elements) {
+      if (e.type !== "relation" || !e.members) continue;
+      const name = e.tags && e.tags.name;
+      if (!name) continue;
+      for (const m of e.members) {
+        if (m.type !== "way" || !m.geometry || m.geometry.length < 2) continue;
+        out.push({ name, path: m.geometry.map((g) => ({ lat: g.lat, lng: g.lon })) });
+      }
+    }
+    return out;
+  }
+
   // Panoramen werden LAZY entlang der Route gesucht — immer nur ein paar voraus,
   // nicht die ganze Route vorab. So startet es sofort, und eine lange Route
   // kostet nur so viel API, wie man tatsächlich abfährt.
   const BUFFER = 5;
-  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [], cities = [];
+  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [], cities = [], scenicWays = [];
 
   // Bundesstaat/Provinz an einem Punkt (keyless via Photon) → "US|Colorado"
   // US-Bundesstaats-Grenzen als lokale Polygone (einmal laden) → Grenzerkennung ohne
@@ -511,6 +537,7 @@
     const seen = new Set();
     const borderMode = $("border").checked;
     const poiMode = $("poi").checked;
+    const scenicMode = $("scenic").checked;
     const junctionMode = !!naviPoints && $("avoidHw").checked; // Google-Route hat keine Kreuzungen
     const stopIdx = new Set(); // Route-Vertizes, an denen gehalten wird (Manöver + Kreuzungen)
     let lastChkM = -1, curState = null;
@@ -533,6 +560,11 @@
           return inCity(ll) ? null : p; // in Stadt → überspringen
         }
       }
+      return null;
+    };
+    // Läuft der Punkt gerade auf einer Scenic Byway? → Name (für grünen Balken), sonst null
+    const onScenicByway = (pt) => {
+      for (const s of scenicWays) if (google.maps.geometry.poly.isLocationOnEdge(pt, s.poly, 0.0006)) return s.name; // ~66 m
       return null;
     };
 
@@ -570,7 +602,7 @@
       }
     };
     async function maybePrefetch() {
-      if ((!poiMode && !junctionMode) || poiFetching || walkedM + 5000 < poiFetchedM) return;
+      if ((!poiMode && !junctionMode && !scenicMode) || poiFetching || walkedM + 5000 < poiFetchedM) return;
       poiFetching = true;
       const from = poiFetchedM; poiFetchedM += 30000; // 30-km-Chunk, direkt reservieren
       try {
@@ -581,6 +613,13 @@
             for (const p of found) if (!pois.some((x) => x.name === p.name)) pois.push(p);
           }
           if (junctionMode) addJunctionsToStops(await fetchJunctionsForPoints(chunk), from, poiFetchedM);
+          if (scenicMode) {
+            for (const s of await fetchScenicForPoints(chunk)) {
+              const key = s.name + "|" + s.path.length + "|" + s.path[0].lat.toFixed(4) + "," + s.path[0].lng.toFixed(4);
+              if (scenicWays.some((x) => x.key === key)) continue;
+              scenicWays.push({ name: s.name, key, poly: new google.maps.Polyline({ path: s.path }) });
+            }
+          }
         }
       } catch (e) {}
       poiFetching = false;
@@ -631,7 +670,9 @@
       if (myGen !== gen) return false;
       if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
       const poi = poiMode ? nearbyPoi(pt) : null;
-      await pushPano(pt, !!poi, poi ? 500 : undefined, poi ? poi.name : undefined, distM);
+      let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined;
+      if (!special && scenicMode) { const sb = onScenicByway(pt); if (sb) { special = true; label = "Scenic Byway: " + sb; } }
+      await pushPano(pt, special, rad, label, distM);
       return true;
     };
 
@@ -947,7 +988,7 @@
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
       const myGen = gen;
-      pois = []; cities = []; // werden im Producer lazy nachgeladen (immer ein Stück voraus)
+      pois = []; cities = []; scenicWays = []; // werden im Producer lazy nachgeladen (immer ein Stück voraus)
       panoList = []; consumerIdx = 0; producerDone = false;
       running = true;
       const stepM = Math.max(5, Number($("stepM").value) || 20);
