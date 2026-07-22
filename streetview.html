@@ -137,7 +137,7 @@
     </label>
     <div style="margin-top:8px;"><label>Navi: max Sprung (km)</label><input id="maxjump" type="number" value="10" /></div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
-      <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
+      <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an US-Bundesstaatsgrenzen
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
       <input type="checkbox" id="poi" checked style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
@@ -459,12 +459,33 @@
   let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [], cities = [];
 
   // Bundesstaat/Provinz an einem Punkt (keyless via Photon) → "US|Colorado"
-  async function stateOf(latLng) {
+  // US-Bundesstaats-Grenzen als lokale Polygone (einmal laden) → Grenzerkennung ohne
+  // API-Calls, zuverlässig und schnell (kein Photon mehr, das war zu unzuverlässig).
+  let stateBoundaries = null;
+  async function loadStateBoundaries() {
+    if (stateBoundaries) return stateBoundaries;
     try {
-      const r = await fetch(`https://photon.komoot.io/reverse?lon=${latLng.lng()}&lat=${latLng.lat()}`);
-      const p = (await r.json()).features?.[0]?.properties;
-      return p ? (p.countrycode || "") + "|" + (p.state || "") : null;
-    } catch (e) { return null; }
+      const j = await (await fetch("https://cdn.jsdelivr.net/gh/PublicaMundi/MappingAPI@master/data/geojson/us-states.json")).json();
+      stateBoundaries = j.features.map((f) => {
+        const g = f.geometry, rings = [];
+        if (g.type === "Polygon") rings.push(g.coordinates[0]);
+        else if (g.type === "MultiPolygon") for (const poly of g.coordinates) rings.push(poly[0]);
+        const polys = rings.map((r) => new google.maps.Polygon({ paths: r.map(([lng, lat]) => ({ lat, lng })) }));
+        const bounds = new google.maps.LatLngBounds();
+        polys.forEach((p) => p.getPath().forEach((ll) => bounds.extend(ll)));
+        return { name: f.properties.name, cc: "US", polys, bounds };
+      });
+    } catch (e) { stateBoundaries = []; }
+    return stateBoundaries;
+  }
+  // Bundesstaat an einem Punkt (synchron, lokal) → "US|Colorado" oder null (außerhalb USA)
+  function stateOf(ll) {
+    if (!stateBoundaries) return null;
+    for (const s of stateBoundaries) {
+      if (!s.bounds.contains(ll)) continue;
+      for (const p of s.polys) if (google.maps.geometry.poly.containsLocation(ll, p)) return s.cc + "|" + s.name;
+    }
+    return null;
   }
 
   async function startProducer(rawPath, radius, stepM, naviPoints, myGen) {
@@ -472,7 +493,8 @@
     const seen = new Set();
     const borderMode = $("border").checked;
     const poiMode = $("poi").checked;
-    let lastChkM = -1, curState = null, borderActive = true;
+    let lastChkM = -1, curState = null;
+    if (borderMode) await loadStateBoundaries(); // einmal die Grenz-Polygone laden
 
     // Nur Panoramen akzeptieren, die AUF der Route liegen — verhindert Sprünge auf
     // Parallel-/Querstraßen (getPanorama schnappt sonst aufs global nächste Panorama).
@@ -554,19 +576,13 @@
     // die Grenze per Binärsuche ENTLANG DER ROUTE einkreisen (nicht Luftlinie) und
     // dort einen Pflicht-Stopp setzen — so liegt der Stopp genau am Übergang.
     async function borderCheck() {
-      if (!borderActive) return;
-      if (lastChkM >= 0 && walkedM - lastChkM < 7000) return;
-      const st = await stateOf(pointAtDistance(walkedM));
+      if (lastChkM >= 0 && walkedM - lastChkM < 1500) return; // lokal + billig → oft prüfen
+      const st = stateOf(pointAtDistance(walkedM));
       if (st) {
-        if (!/^(US|CA)\|/.test(st)) borderActive = false; // nur USA/Kanada
-        else if (curState && st !== curState) {
-          let lo = lastChkM, hi = walkedM; // Grenze liegt zwischen diesen Streckenmetern
-          for (let i = 0; i < 9; i++) {
-            const mid = (lo + hi) / 2;
-            (await stateOf(pointAtDistance(mid))) === curState ? (lo = mid) : (hi = mid);
-          }
-          const s2 = await stateOf(pointAtDistance(hi + 200));
-          await insertBorder(hi, "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // an richtiger Position
+        if (curState && st !== curState) {
+          let lo = lastChkM, hi = walkedM; // Grenze zwischen diesen Streckenmetern
+          for (let i = 0; i < 10; i++) { const mid = (lo + hi) / 2; stateOf(pointAtDistance(mid)) === curState ? (lo = mid) : (hi = mid); }
+          await insertBorder(hi, "Grenze → " + st.split("|")[1]); // exakt + richtige Position
         }
         curState = st;
       }
