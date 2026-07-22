@@ -16,6 +16,9 @@ Single self-contained file, no build step — just static HTML.
   a highway between exits).
 - Route options: **avoid highways / tolls / ferries** (via Google Directions;
   falls back to the normal route if that API isn't enabled).
+- **Scenic byways:** detects when the route runs on a named scenic byway (from
+  OpenStreetMap route relations) and shows a green bar with its name. Detection
+  only — it does not steer the route onto byways.
 - Mini map (bottom-left) tracking the current position.
 - Local usage estimate (top-right) as a rough free-quota gauge.
 
