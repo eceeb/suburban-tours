@@ -60,11 +60,34 @@
   #usage b { color: #e8ecf3; font-variant-numeric: tabular-nums; }
   #usage.warn b { color: #ffb020; }
   #usage.over b { color: #ff8080; }
+
+  /* Menü einklappen */
+  #collapse { position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
+    border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 15px; line-height: 1; }
+  #panel.hidden { display: none; }
+  #menuToggle { position: fixed; top: 12px; left: 12px; z-index: 12; display: none;
+    width: 40px; height: 40px; border-radius: 10px; border: 1px solid #2a2f3a;
+    background: rgba(18,21,28,.92); color: #e8ecf3; font-size: 18px; cursor: pointer; }
+  #menuToggle.show { display: block; }
+
+  /* Pause-Werkzeuge (nur im Pause-Modus) */
+  #pauseTools { display: none; align-items: center; gap: 6px; }
+  #controls.paused #pauseTools { display: flex; }
+  #pauseTools button { border: 0; background: #2a2f3a; color: #e8ecf3; width: 34px; height: 34px;
+    border-radius: 50%; cursor: pointer; font-size: 14px; }
+  #pauseTools button.on { background: #f5c518; color: #111; }
+
+  /* kleine Zoom-Buttons für die Mini-Karte */
+  #miniZoom { position: absolute; right: 6px; bottom: 6px; z-index: 5;
+    display: flex; flex-direction: column; gap: 3px; }
+  #miniZoom button { width: 22px; height: 22px; border: 0; border-radius: 4px;
+    background: rgba(18,21,28,.9); color: #e8ecf3; font-size: 15px; line-height: 1; cursor: pointer; }
 </style>
 
 <div id="panoA" class="stage"></div>
 
 <div id="panel">
+  <button id="collapse" title="Menü einklappen">–</button>
   <h1>🛣️ Suburban Tours — Street View</h1>
 
   <label>Google Maps API-Key</label>
@@ -111,11 +134,21 @@
   </div>
 </div>
 
-<div id="minimap"><div id="minimap-inner"></div></div>
+<button id="menuToggle" title="Menü">☰</button>
+
+<div id="minimap">
+  <div id="minimap-inner"></div>
+  <div id="miniZoom"><button id="miniIn" title="Zoom +">+</button><button id="miniOut" title="Zoom −">−</button></div>
+</div>
 <div id="usage"></div>
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
+  <span id="pauseTools">
+    <button id="back" title="Vorheriger Stopp">◀</button>
+    <button id="fav" title="Als Favorit merken">★</button>
+    <button id="openmaps" title="In Google Maps öffnen">🔗</button>
+  </span>
   <div class="speed">
     <span>schnell</span>
     <input id="speed" type="range" min="300" max="6000" value="1400" step="100" />
@@ -153,7 +186,7 @@
   }
   renderUsage();
 
-  let mapsLoaded = false, panoA, svService, miniMap, miniMarker;
+  let mapsLoaded = false, panoA, svService, miniMap, miniMarker, routeLine = null, routePathCoords = [];
 
   // Googles offizieller Bootstrap-Loader — stellt google.maps.importLibrary bereit
   function bootstrapGoogleMaps(key) {
@@ -347,6 +380,7 @@
   }
 
   let paused = false, running = false, needResync = false;
+  let curIdx = 0, segElapsed = 0, shownIdx = -1, smoothHdg = 0, tourPano = null;
   // Verweildauer pro Panorama (ms) — Quelle ist das Feld, Regler schreibt hinein
   const stepMsLive = () => Math.max(200, (Number($("dwell").value) || 1.4) * 1000);
   // Regler ↔ Feld synchron halten
@@ -361,6 +395,45 @@
     if (paused && !p) needResync = true; // beim Fortsetzen Blick vom User übernehmen
     paused = p;
     $("pause").textContent = p ? "▶" : "⏸";
+    $("controls").classList.toggle("paused", p); // Pause-Werkzeuge ein/aus
+    if (p) refreshFav();
+  }
+
+  // --- Favoriten (lokale Ablage im Browser) ---
+  const FAV_KEY = "svFavorites";
+  const getFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } };
+  const isFav = (panoId) => getFavs().some((f) => f.pano === panoId);
+  function toggleFav() {
+    const it = panoList[curIdx]; if (!it) return;
+    const favs = getFavs(), at = favs.findIndex((f) => f.pano === it.pano);
+    if (at >= 0) favs.splice(at, 1);
+    else favs.push({ pano: it.pano, lat: it.latLng.lat(), lng: it.latLng.lng(), added: Date.now() });
+    localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+    refreshFav();
+  }
+  function refreshFav() {
+    const it = panoList[curIdx];
+    if (it) $("fav").classList.toggle("on", isFav(it.pano));
+  }
+
+  // Aktuelle Stelle im echten Google Maps / Street View öffnen
+  function openInMaps() {
+    const it = panoList[curIdx]; if (!it) return;
+    const h = tourPano ? Math.round(tourPano.getPov().heading) : Math.round(headingAt(curIdx));
+    const url = "https://www.google.com/maps/@?api=1&map_action=pano" +
+      `&viewpoint=${it.latLng.lat()},${it.latLng.lng()}&heading=${h}`;
+    window.open(url, "_blank");
+  }
+
+  // Zu einem Stopp springen (für Zurück-Button im Pause-Modus)
+  function goToStop(idx) {
+    idx = Math.max(0, Math.min(idx, panoList.length - 1));
+    curIdx = idx; segElapsed = 0; shownIdx = idx;
+    smoothHdg = headingAt(idx);
+    tourPano.setPano(panoList[idx].pano); bumpUsage(1);
+    tourPano.setPov({ heading: smoothHdg, pitch: 0, zoom: 0 });
+    updateMini(idx); refreshFav();
+    $("prog").textContent = `${idx + 1}`;
   }
 
   const sph = () => google.maps.geometry.spherical;
@@ -375,9 +448,8 @@
 
   function updateMini(idx) {
     const it = panoList[idx];
-    if (!it || !miniMap) return;
-    miniMarker.setPosition(it.latLng);
-    miniMap.setCenter(it.latLng);
+    if (!it || !miniMarker) return;
+    miniMarker.setPosition(it.latLng); // Marker wandert; Karte zeigt die ganze Route
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
@@ -388,69 +460,82 @@
     $("controls").classList.add("show");
     $("panoA").style.opacity = 1; $("panoA").style.zIndex = 1;
 
-    const pano = panoA;
-    pano.setPano(panoList[0].pano); bumpUsage(1);
-    pano.setPov({ heading: headingAt(0), pitch: 0, zoom: 0 });
+    tourPano = panoA;
     $("minimap").classList.add("show");
     // Karte erst jetzt erstellen (Container ist sichtbar/hat Größe) — sonst rendert sie grau
     if (!miniMap) {
       miniMap = new google.maps.Map($("minimap-inner"), {
         zoom: 8, center: panoList[0].latLng,
-        disableDefaultUI: true, clickableIcons: false, gestureHandling: "none", keyboardShortcuts: false,
+        disableDefaultUI: true, clickableIcons: false,
+        gestureHandling: "cooperative", keyboardShortcuts: false,
       });
       miniMarker = new google.maps.Marker({ map: miniMap });
     } else {
       google.maps.event.trigger(miniMap, "resize");
     }
-    updateMini(0);
-    let smoothHdg = headingAt(0), shownIdx = 0;
+    // Route als Linie einzeichnen (alte entfernen) und Karte darauf einpassen
+    if (routeLine) routeLine.setMap(null);
+    routeLine = new google.maps.Polyline({
+      path: routePathCoords, map: miniMap,
+      strokeColor: "#4c7dff", strokeWeight: 3, strokeOpacity: 0.9,
+    });
+    const b = new google.maps.LatLngBounds();
+    routePathCoords.forEach((p) => b.extend(p));
+    if (!b.isEmpty()) miniMap.fitBounds(b, 24);
+
+    curIdx = 0; segElapsed = 0; shownIdx = 0; smoothHdg = headingAt(0);
+    tourPano.setPano(panoList[0].pano); bumpUsage(1);
+    tourPano.setPov({ heading: smoothHdg, pitch: 0, zoom: 0 });
+    updateMini(0); refreshFav();
 
     return new Promise((resolve) => {
-      let i = 0, segElapsed = 0, lastTs = null;
+      let lastTs = null;
       function frame(ts) {
         if (myGen !== gen) return; // durch neue Tour ersetzt → stoppen
         if (lastTs == null) lastTs = ts;
         const dt = Math.min(100, ts - lastTs); lastTs = ts; // Sprung nach Tab-Wechsel abklemmen
-        consumerIdx = i;
+        consumerIdx = curIdx;
 
-        const nxt = panoList[i + 1];
-        if (!nxt) {
-          if (producerDone) {
-            running = false;
-            $("controls").classList.remove("show");
-            setStatus("Angekommen 🏁");
-            resolve();
-            return;
-          }
-          setStatus("Lade nächstes Panorama…"); // Puffer leer → warten, nicht weiterlaufen
+        if (paused) {
+          // Pause: Kamera frei (ziehen/zoomen), ◀ zurück, ★ merken, 🔗 in Maps öffnen
+          setStatus("Pausiert ⏸ — umsehen · ◀ zurück · ★ merken · 🔗 öffnen");
+          $("prog").textContent = `${curIdx + 1}`;
           requestAnimationFrame(frame);
           return;
         }
 
-        if (paused) {
-          // Freies Umschauen: wir fassen die Kamera nicht an, der User zieht selbst
-          setStatus("Pausiert ⏸ — ziehen zum Umsehen");
-          $("prog").textContent = `${i + 1}`;
+        const nxt = panoList[curIdx + 1];
+        if (!nxt) {
+          if (producerDone) {
+            running = false;
+            setStatus("Angekommen 🏁 — ⏸ zum Umsehen");
+            setPause(true); // am Ziel anhalten statt Steuerung ausblenden
+            requestAnimationFrame(frame);
+            return;
+          }
+          setStatus("Lade nächstes Panorama…"); // Puffer leer → warten
           requestAnimationFrame(frame);
           return;
         }
 
         // Beim Weiterspielen dort ansetzen, wo der User hinschaut (kein Zurückschnappen)
-        if (needResync) { smoothHdg = pano.getPov().heading; needResync = false; }
+        if (needResync) { smoothHdg = tourPano.getPov().heading; needResync = false; }
 
         segElapsed += dt;
         const f = Math.min(1, segElapsed / stepMsLive());
         const fx = $("fx").checked;
-        // Blick sanft zur Fahrtrichtung führen → dämpft Seitwärts-Schwenks
-        smoothHdg = lerpAngle(smoothHdg, headingAt(i), 0.08);
-        pano.setPov({ heading: smoothHdg, pitch: 0, zoom: fx ? zoomFor(distAt(i)) * f : 0 });
-        $("prog").textContent = `${i + 1}`;
+        smoothHdg = lerpAngle(smoothHdg, headingAt(curIdx), 0.08);
+        tourPano.setPov({ heading: smoothHdg, pitch: 0, zoom: fx ? zoomFor(distAt(curIdx)) * f : 0 });
+        $("prog").textContent = `${curIdx + 1}`;
         setStatus("Tour läuft… ▶");
 
         if (f >= 1) {
-          i++;
+          curIdx++;
           segElapsed = 0;
-          if (shownIdx !== i) { pano.setPano(panoList[i].pano); bumpUsage(1); shownIdx = i; updateMini(i); } // Anzeige + Karte nach
+          if (shownIdx !== curIdx) {
+            tourPano.setPano(panoList[curIdx].pano); bumpUsage(1);
+            shownIdx = curIdx; updateMini(curIdx); refreshFav();
+          }
         }
         requestAnimationFrame(frame);
       }
@@ -459,6 +544,13 @@
   }
 
   $("pause").addEventListener("click", () => setPause(!paused));
+  $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
+  $("fav").addEventListener("click", toggleFav);
+  $("openmaps").addEventListener("click", openInMaps);
+  $("miniIn").addEventListener("click", () => miniMap && miniMap.setZoom(miniMap.getZoom() + 1));
+  $("miniOut").addEventListener("click", () => miniMap && miniMap.setZoom(miniMap.getZoom() - 1));
+  $("collapse").addEventListener("click", () => { $("panel").classList.add("hidden"); $("menuToggle").classList.add("show"); });
+  $("menuToggle").addEventListener("click", () => { $("panel").classList.remove("hidden"); $("menuToggle").classList.remove("show"); });
 
   $("go").addEventListener("click", async () => {
     const key = $("key").value.trim();
@@ -484,6 +576,7 @@
       await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
       const destination = await geocode($("end").value.trim());
       const route = await routePath(origin, destination);
+      routePathCoords = route.path; // für die Linie auf der Mini-Karte
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
       const myGen = gen;
