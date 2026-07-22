@@ -45,6 +45,7 @@
     box-shadow: 0 8px 30px rgba(0,0,0,.5); color: #e8ecf3; font-size: 13px;
   }
   #controls.show { display: flex; }
+  #controls.special { background: rgba(20,110,60,.95); border-color: #2ec46b; box-shadow: 0 0 0 2px rgba(46,196,107,.4), 0 8px 30px rgba(0,0,0,.5); }
   #pause { border:0; background:#4c7dff; color:#fff; width:38px; height:38px;
     border-radius:50%; font-size:15px; cursor:pointer; flex:0 0 auto; }
   #controls .speed { display:flex; align-items:center; gap:8px; }
@@ -122,7 +123,7 @@
   <details>
     <summary>Einstellungen</summary>
     <div class="settings">
-      <div><label>Verweildauer (s)</label><input id="dwell" type="number" step="0.1" min="0.2" value="1.4" /></div>
+      <div><label>Verweildauer (s)</label><input id="dwell" type="number" step="0.1" min="0.2" value="3" /></div>
       <div><label>Abstand (m)</label><input id="stepM" type="number" value="20" /></div>
       <div><label>Snap-Radius (m)</label><input id="radius" type="number" value="60" /></div>
     </div>
@@ -130,11 +131,11 @@
       <input type="checkbox" id="fx" checked style="width:auto;" /> weiche Übergänge (Zoom)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
-      <input type="checkbox" id="navi" style="width:auto;" /> Navi-Modus (Kreuzung zu Kreuzung)
+      <input type="checkbox" id="navi" checked style="width:auto;" /> Navi-Modus (Kreuzung zu Kreuzung)
     </label>
     <div style="margin-top:8px;"><label>Navi: max Sprung (km)</label><input id="maxjump" type="number" value="10" /></div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
-      <input type="checkbox" id="border" style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
+      <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
       <input type="checkbox" id="avoidHw" style="width:auto;" /> Autobahnen meiden
@@ -184,7 +185,7 @@
   </span>
   <div class="speed">
     <span>schnell</span>
-    <input id="speed" type="range" min="300" max="6000" value="1400" step="100" />
+    <input id="speed" type="range" min="300" max="6000" value="3000" step="100" />
     <span>langsam</span>
   </div>
   <div id="prog"></div>
@@ -411,8 +412,8 @@
     const borderMode = $("border").checked;
     let stateChkPt = null, curState = null, stateAcc = 0, borderActive = true;
 
-    const pushPano = async (pt, isBorder) => {
-      const loc = await nearestPano(pt, radius);
+    const pushPano = async (pt, isBorder, rad) => {
+      const loc = await nearestPano(pt, rad || radius);
       if (loc && !seen.has(loc.pano)) {
         seen.add(loc.pano);
         panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!isBorder });
@@ -435,7 +436,7 @@
             const s = await stateOf(sph.interpolate(stateChkPt, pt, mid));
             if (s === curState) lo = mid; else hi = mid;
           }
-          await pushPano(sph.interpolate(stateChkPt, pt, hi), true); // Stopp an der Grenze
+          await pushPano(sph.interpolate(stateChkPt, pt, hi), true, 400); // Stopp an der Grenze (großzügiger Radius)
         }
         curState = st;
       }
@@ -628,6 +629,8 @@
       miniMap.setCenter(it.latLng); // Karte folgt der aktuellen Position
       if (miniAutoZoom) miniMap.setZoom(zoomForDist(distAt(idx)));
     }
+    // Steuerleiste grün, wenn hier etwas Besonderes ist (Grenze / später POI)
+    $("controls").classList.toggle("special", !!it.border);
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
