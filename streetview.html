@@ -52,6 +52,8 @@
   #controls .speed span { color:#9aa4b2; font-size:11px; white-space:nowrap; }
   #controls input[type=range] { width:130px; accent-color:#4c7dff; }
   #prog { color:#9aa4b2; font-variant-numeric: tabular-nums; min-width:56px; text-align:right; }
+  #specialLabel { color:#fff; font-size:12px; font-weight:600; max-width:180px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   #minimap {
     position: fixed; left: 12px; bottom: 16px; z-index: 15;
@@ -137,6 +139,9 @@
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
       <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
     </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
+      <input type="checkbox" id="poi" style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
+    </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
       <input type="checkbox" id="avoidHw" style="width:auto;" /> Autobahnen meiden
     </label>
@@ -188,6 +193,7 @@
     <input id="speed" type="range" min="300" max="6000" value="3000" step="100" />
     <span>langsam</span>
   </div>
+  <span id="specialLabel"></span>
   <div id="prog"></div>
 </div>
 
@@ -391,11 +397,67 @@
     return { path, waypoints };
   }
 
+  // Sehenswürdigkeiten (keyless via Overpass/OSM). Öffentliche Server sind zäh,
+  // darum mehrere Mirrors der Reihe nach mit Timeout — der erste, der sauberes
+  // JSON liefert, gewinnt. Schlägt alles fehl → einfach keine POI-Stopps.
+  const OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.openstreetmap.ru/cgi/interpreter",
+  ];
+  async function overpassQuery(q, perTimeout = 6000) {
+    for (const url of OVERPASS_MIRRORS) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), perTimeout);
+        const r = await fetch(url, { method: "POST", body: q, signal: ctrl.signal });
+        clearTimeout(t);
+        if (!r.ok) continue;
+        const j = JSON.parse(await r.text()); // XML-Fehlerantwort wirft → nächster Mirror
+        if (j && j.elements) return j;
+      } catch (e) { /* nächster Mirror */ }
+    }
+    return null;
+  }
+
+  // Nur „ganz Besonderes": POIs mit wikidata-Tag (= enzyklopädie-würdig) nahe der Route.
+  async function fetchPois(rawPath) {
+    const sph = google.maps.geometry.spherical;
+    const pts = [rawPath[0]]; let acc = 0;
+    for (let i = 1; i < rawPath.length; i++) {
+      acc += sph.computeDistanceBetween(rawPath[i - 1], rawPath[i]);
+      if (acc >= 3000) { pts.push(rawPath[i]); acc = 0; }
+    }
+    const last = rawPath[rawPath.length - 1];
+    if (pts[pts.length - 1] !== last) pts.push(last);
+    const coords = pts.slice(0, 120).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
+    const q = `[out:json][timeout:25];(` +
+      `node(around:1200,${coords})[tourism][wikidata];` +
+      `node(around:1200,${coords})[historic][wikidata];` +
+      `node(around:1200,${coords})[boundary=national_park][wikidata];` +
+      `way(around:1200,${coords})[tourism][wikidata];` +
+      `);out center 60;`;
+    const j = await overpassQuery(q);
+    if (!j) return [];
+    const seen = new Set(), out = [];
+    for (const e of j.elements) {
+      const name = e.tags && e.tags.name;
+      const lat = e.lat != null ? e.lat : e.center && e.center.lat;
+      const lng = e.lon != null ? e.lon : e.center && e.center.lon;
+      if (!name || lat == null || seen.has(name)) continue;
+      seen.add(name); out.push({ lat, lng, name });
+    }
+    return out;
+  }
+
   // Panoramen werden LAZY entlang der Route gesucht — immer nur ein paar voraus,
   // nicht die ganze Route vorab. So startet es sofort, und eine lange Route
   // kostet nur so viel API, wie man tatsächlich abfährt.
   const BUFFER = 5;
-  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0;
+  let panoList = [], consumerIdx = 0, producerDone = false, gen = 0, pois = [];
 
   // Bundesstaat/Provinz an einem Punkt (keyless via Photon) → "US|Colorado"
   async function stateOf(latLng) {
@@ -410,6 +472,7 @@
     const sph = google.maps.geometry.spherical;
     const seen = new Set();
     const borderMode = $("border").checked;
+    const poiMode = $("poi").checked;
     let stateChkPt = null, curState = null, stateAcc = 0, borderActive = true;
 
     // Nur Panoramen akzeptieren, die AUF der Route liegen — verhindert Sprünge auf
@@ -417,11 +480,20 @@
     const routePoly = new google.maps.Polyline({ path: rawPath });
     const onRoute = (ll) => google.maps.geometry.poly.isLocationOnEdge(ll, routePoly, 0.0004); // ~44 m
 
-    const pushPano = async (pt, isBorder, rad) => {
+    // Nächste noch nicht besuchte Sehenswürdigkeit in Reichweite (aus der Overpass-Liste)
+    const nearbyPoi = (pt) => {
+      for (const p of pois) {
+        if (p.used) continue;
+        if (sph.computeDistanceBetween(pt, new google.maps.LatLng(p.lat, p.lng)) < 500) { p.used = true; return p; }
+      }
+      return null;
+    };
+
+    const pushPano = async (pt, special, rad, label) => {
       const loc = await nearestPano(pt, rad || radius);
-      if (loc && !seen.has(loc.pano) && (isBorder || onRoute(loc.latLng))) {
+      if (loc && !seen.has(loc.pano) && (special || onRoute(loc.latLng))) {
         seen.add(loc.pano);
-        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!isBorder });
+        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null });
       }
     };
 
@@ -441,7 +513,9 @@
             const s = await stateOf(sph.interpolate(stateChkPt, pt, mid));
             if (s === curState) lo = mid; else hi = mid;
           }
-          await pushPano(sph.interpolate(stateChkPt, pt, hi), true, 400); // Stopp an der Grenze (großzügiger Radius)
+          const s2 = await stateOf(sph.interpolate(stateChkPt, pt, Math.min(1, hi + 0.02)));
+          await pushPano(sph.interpolate(stateChkPt, pt, hi), true, 400,
+            "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // Stopp an der Grenze
         }
         curState = st;
       }
@@ -453,7 +527,8 @@
       while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
       if (myGen !== gen) return false;
       if (borderMode) { await borderCheck(pt); if (myGen !== gen) return false; }
-      await pushPano(pt);
+      const poi = poiMode ? nearbyPoi(pt) : null;
+      await pushPano(pt, !!poi, poi ? 500 : undefined, poi ? poi.name : undefined);
       return true;
     };
 
@@ -634,8 +709,9 @@
       miniMap.setCenter(it.latLng); // Karte folgt der aktuellen Position
       if (miniAutoZoom) miniMap.setZoom(zoomForDist(distAt(idx)));
     }
-    // Steuerleiste grün, wenn hier etwas Besonderes ist (Grenze / später POI)
+    // Steuerleiste grün + Label, wenn hier etwas Besonderes ist (Grenze / POI)
     $("controls").classList.toggle("special", !!it.border);
+    $("specialLabel").textContent = it.border && it.label ? it.label : "";
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
@@ -764,6 +840,8 @@
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
       const myGen = gen;
+      pois = [];
+      if ($("poi").checked) fetchPois(route.path).then((p) => { if (myGen === gen) pois = p; }).catch(() => {});
       panoList = []; consumerIdx = 0; producerDone = false;
       running = true;
       const stepM = Math.max(5, Number($("stepM").value) || 20);
