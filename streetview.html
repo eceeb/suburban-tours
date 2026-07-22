@@ -133,6 +133,9 @@
       <input type="checkbox" id="navi" style="width:auto;" /> Navi-Modus (Kreuzung zu Kreuzung)
     </label>
     <div style="margin-top:8px;"><label>Navi: max Sprung (km)</label><input id="maxjump" type="number" value="10" /></div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
+      <input type="checkbox" id="border" style="width:auto;" /> Stopp an Staatsgrenzen (USA/Kanada)
+    </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
       <input type="checkbox" id="avoidHw" style="width:auto;" /> Autobahnen meiden
     </label>
@@ -217,6 +220,7 @@
   renderUsage();
 
   let mapsLoaded = false, panoA, svService, miniMap, miniMarker, routeLine = null, routePathCoords = [];
+  let miniAutoZoom = true; // Auto-Zoom der Mini-Karte (aus, sobald der User manuell zoomt)
 
   // Googles offizieller Bootstrap-Loader — stellt google.maps.importLibrary bereit
   function bootstrapGoogleMaps(key) {
@@ -392,18 +396,58 @@
   const BUFFER = 5;
   let panoList = [], consumerIdx = 0, producerDone = false, gen = 0;
 
+  // Bundesstaat/Provinz an einem Punkt (keyless via Photon) → "US|Colorado"
+  async function stateOf(latLng) {
+    try {
+      const r = await fetch(`https://photon.komoot.io/reverse?lon=${latLng.lng()}&lat=${latLng.lat()}`);
+      const p = (await r.json()).features?.[0]?.properties;
+      return p ? (p.countrycode || "") + "|" + (p.state || "") : null;
+    } catch (e) { return null; }
+  }
+
   async function startProducer(rawPath, radius, stepM, naviPoints, myGen) {
     const sph = google.maps.geometry.spherical;
     const seen = new Set();
-    // ein Punkt → nächstes Panorama suchen und (falls neu) anhängen
-    const emit = async (pt) => {
-      while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
-      if (myGen !== gen) return false;
+    const borderMode = $("border").checked;
+    let stateChkPt = null, curState = null, stateAcc = 0, borderActive = true;
+
+    const pushPano = async (pt, isBorder) => {
       const loc = await nearestPano(pt, radius);
       if (loc && !seen.has(loc.pano)) {
         seen.add(loc.pano);
-        panoList.push({ pano: loc.pano, latLng: loc.latLng });
+        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!isBorder });
       }
+    };
+
+    // Grenzerkennung: alle ~7 km den Staat prüfen; bei Wechsel (nur USA/Kanada)
+    // die Grenze per Binärsuche einkreisen und dort einen Pflicht-Stopp einfügen.
+    async function borderCheck(pt) {
+      if (!borderActive) return;
+      if (stateChkPt) stateAcc += sph.computeDistanceBetween(stateChkPt, pt);
+      if (stateChkPt && stateAcc < 7000) return;
+      const st = await stateOf(pt);
+      if (st) {
+        if (!/^(US|CA)\|/.test(st)) borderActive = false; // nur USA/Kanada
+        else if (curState && st !== curState) {
+          let lo = 0, hi = 1;
+          for (let i = 0; i < 6; i++) {
+            const mid = (lo + hi) / 2;
+            const s = await stateOf(sph.interpolate(stateChkPt, pt, mid));
+            if (s === curState) lo = mid; else hi = mid;
+          }
+          await pushPano(sph.interpolate(stateChkPt, pt, hi), true); // Stopp an der Grenze
+        }
+        curState = st;
+      }
+      stateChkPt = pt; stateAcc = 0;
+    }
+
+    // ein Punkt → (optional Grenze prüfen) → nächstes Panorama suchen und anhängen
+    const emit = async (pt) => {
+      while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
+      if (myGen !== gen) return false;
+      if (borderMode) { await borderCheck(pt); if (myGen !== gen) return false; }
+      await pushPano(pt);
       return true;
     };
 
@@ -411,20 +455,23 @@
     // (auf der Autobahn ohne Ausfahrt gibt's dann alle ~10 km einen Zwischenstopp)
     if (naviPoints) {
       const maxJump = Math.max(500, (Number($("maxjump").value) || 10) * 1000);
-      const stops = [];
-      let prev = null;
-      for (const p of naviPoints) {
-        if (prev) {
-          const gap = sph.computeDistanceBetween(prev, p);
-          const n = Math.floor(gap / maxJump);
-          for (let k = 1; k <= n; k++) stops.push(sph.interpolate(prev, p, (k * maxJump) / gap));
+      const keyOf = (p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5);
+      const isX = new Set(naviPoints.map(keyOf)); // Kreuzungen/Ausfahrten
+      // ENTLANG der echten Straßen-Geometrie laufen: Halt an jeder Kreuzung, sonst
+      // spätestens alle maxJump Meter — die Zwischenpunkte liegen so immer auf der Straße.
+      let distSince = 0;
+      if (!(await emit(rawPath[0]))) return;
+      for (let s = 1; s < rawPath.length && myGen === gen; s++) {
+        const a = rawPath[s - 1], b = rawPath[s];
+        const segLen = sph.computeDistanceBetween(a, b);
+        if (segLen === 0) continue;
+        let pos = 0;
+        while (segLen - pos >= maxJump - distSince && myGen === gen) {
+          pos += maxJump - distSince; distSince = 0;
+          if (!(await emit(sph.interpolate(a, b, pos / segLen)))) return;
         }
-        stops.push(p);
-        prev = p;
-      }
-      for (const pt of stops) {
-        if (myGen !== gen) return;
-        if (!(await emit(pt))) return;
+        distSince += segLen - pos;
+        if (isX.has(keyOf(b))) { distSince = 0; if (!(await emit(b))) return; }
       }
       if (myGen === gen) producerDone = true;
       return;
@@ -571,10 +618,16 @@
   const distAt = (i) => panoList[i + 1]
     ? sph().computeDistanceBetween(panoList[i].latLng, panoList[i + 1].latLng) : 12;
 
+  // Zoom passend zur Distanz zum nächsten Stopp: Stadt (klein) → eng, Autobahn (groß) → weit
+  const zoomForDist = (d) => Math.max(10, Math.min(17, Math.round(16 - Math.log2(Math.max(30, d) / 30))));
   function updateMini(idx) {
     const it = panoList[idx];
     if (!it || !miniMarker) return;
-    miniMarker.setPosition(it.latLng); // Marker wandert; Karte zeigt die ganze Route
+    miniMarker.setPosition(it.latLng);
+    if (miniMap) {
+      miniMap.setCenter(it.latLng); // Karte folgt der aktuellen Position
+      if (miniAutoZoom) miniMap.setZoom(zoomForDist(distAt(idx)));
+    }
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
@@ -604,9 +657,7 @@
       path: routePathCoords, map: miniMap,
       strokeColor: "#4c7dff", strokeWeight: 3, strokeOpacity: 0.9,
     });
-    const b = new google.maps.LatLngBounds();
-    routePathCoords.forEach((p) => b.extend(p));
-    if (!b.isEmpty()) miniMap.fitBounds(b, 24);
+    miniAutoZoom = true; // bei neuer Tour wieder automatisch zoomen
 
     curIdx = 0; segElapsed = 0; shownIdx = 0; smoothHdg = headingAt(0);
     tourPano.setPano(panoList[0].pano); bumpUsage(1);
@@ -672,8 +723,8 @@
   $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
   $("fav").addEventListener("click", toggleFav);
   $("openmaps").addEventListener("click", openInMaps);
-  $("miniIn").addEventListener("click", () => miniMap && miniMap.setZoom(miniMap.getZoom() + 1));
-  $("miniOut").addEventListener("click", () => miniMap && miniMap.setZoom(miniMap.getZoom() - 1));
+  $("miniIn").addEventListener("click", () => { miniAutoZoom = false; miniMap && miniMap.setZoom(miniMap.getZoom() + 1); });
+  $("miniOut").addEventListener("click", () => { miniAutoZoom = false; miniMap && miniMap.setZoom(miniMap.getZoom() - 1); });
   $("collapse").addEventListener("click", () => { $("panel").classList.add("hidden"); $("menuToggle").classList.add("show"); });
   $("menuToggle").addEventListener("click", () => { $("panel").classList.remove("hidden"); $("menuToggle").classList.remove("show"); });
 
