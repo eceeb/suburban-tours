@@ -587,8 +587,17 @@
     // (auf der Autobahn ohne Ausfahrt gibt's dann alle ~10 km einen Zwischenstopp)
     if (naviPoints) {
       const maxJump = Math.max(500, (Number($("maxjump").value) || 10) * 1000);
-      const keyOf = (p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5);
-      const isX = new Set(naviPoints.map(keyOf)); // Kreuzungen/Ausfahrten
+      // Jeden Navi-Punkt (Kreuzung/Manöver) aufs nächstgelegene Routen-Segment abbilden —
+      // robust gegen minimale Koordinaten-Abweichungen (sonst wird ein Halt verpasst).
+      const maneuverIdx = new Set();
+      for (const w of naviPoints) {
+        let best = -1, bestD = Infinity;
+        for (let i = 1; i < rawPath.length; i++) {
+          const d = sph.computeDistanceBetween(w, rawPath[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+        if (best >= 0 && bestD < 40) maneuverIdx.add(best);
+      }
       // ENTLANG der echten Straßen-Geometrie laufen: Halt an jeder Kreuzung, sonst
       // spätestens alle maxJump Meter — die Zwischenpunkte liegen so immer auf der Straße.
       let distSince = 0;
@@ -604,7 +613,7 @@
           if (!(await emit(sph.interpolate(a, b, pos / segLen), cum[s - 1] + pos))) return;
         }
         distSince += segLen - pos;
-        if (isX.has(keyOf(b))) { distSince = 0; if (!(await emit(b, cum[s]))) return; }
+        if (maneuverIdx.has(s)) { distSince = 0; if (!(await emit(b, cum[s]))) return; }
       }
       if (myGen === gen) producerDone = true;
       return;
