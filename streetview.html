@@ -472,7 +472,7 @@
     const seen = new Set();
     const borderMode = $("border").checked;
     const poiMode = $("poi").checked;
-    let stateChkPt = null, curState = null, stateAcc = 0, borderActive = true;
+    let lastChkM = -1, curState = null, borderActive = true;
 
     // Nur Panoramen akzeptieren, die AUF der Route liegen — verhindert Sprünge auf
     // Parallel-/Querstraßen (getPanorama schnappt sonst aufs global nächste Panorama).
@@ -498,6 +498,14 @@
     const cum = [0];
     for (let i = 1; i < rawPath.length; i++) cum[i] = cum[i - 1] + sph.computeDistanceBetween(rawPath[i - 1], rawPath[i]);
     let poiFetchedM = 0, poiFetching = false, walkedM = 0;
+    // Punkt bei Streckenmeter m — ENTLANG der Route (nicht Luftlinie)
+    const pointAtDistance = (m) => {
+      if (m <= 0) return rawPath[0];
+      for (let i = 1; i < rawPath.length; i++) {
+        if (cum[i] >= m) return sph.interpolate(rawPath[i - 1], rawPath[i], (m - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1));
+      }
+      return rawPath[rawPath.length - 1];
+    };
     const corridorPoints = (fromM, toM) => {
       const out = []; let lastM = -1e9;
       for (let i = 0; i < rawPath.length; i++) {
@@ -529,35 +537,34 @@
     };
 
     // Grenzerkennung: alle ~7 km den Staat prüfen; bei Wechsel (nur USA/Kanada)
-    // die Grenze per Binärsuche einkreisen und dort einen Pflicht-Stopp einfügen.
-    async function borderCheck(pt) {
+    // die Grenze per Binärsuche ENTLANG DER ROUTE einkreisen (nicht Luftlinie) und
+    // dort einen Pflicht-Stopp setzen — so liegt der Stopp genau am Übergang.
+    async function borderCheck() {
       if (!borderActive) return;
-      if (stateChkPt) stateAcc += sph.computeDistanceBetween(stateChkPt, pt);
-      if (stateChkPt && stateAcc < 7000) return;
-      const st = await stateOf(pt);
+      if (lastChkM >= 0 && walkedM - lastChkM < 7000) return;
+      const st = await stateOf(pointAtDistance(walkedM));
       if (st) {
         if (!/^(US|CA)\|/.test(st)) borderActive = false; // nur USA/Kanada
         else if (curState && st !== curState) {
-          let lo = 0, hi = 1;
-          for (let i = 0; i < 6; i++) {
+          let lo = lastChkM, hi = walkedM; // Grenze liegt zwischen diesen Streckenmetern
+          for (let i = 0; i < 9; i++) {
             const mid = (lo + hi) / 2;
-            const s = await stateOf(sph.interpolate(stateChkPt, pt, mid));
-            if (s === curState) lo = mid; else hi = mid;
+            (await stateOf(pointAtDistance(mid))) === curState ? (lo = mid) : (hi = mid);
           }
-          const s2 = await stateOf(sph.interpolate(stateChkPt, pt, Math.min(1, hi + 0.02)));
-          await pushPano(sph.interpolate(stateChkPt, pt, hi), true, 400,
-            "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // Stopp an der Grenze
+          const s2 = await stateOf(pointAtDistance(hi + 200));
+          await pushPano(pointAtDistance(hi), true, 150,
+            "Grenze" + (s2 ? " → " + s2.split("|")[1] : "")); // ~15 m genau auf der Straße
         }
         curState = st;
       }
-      stateChkPt = pt; stateAcc = 0;
+      lastChkM = walkedM;
     }
 
     // ein Punkt → (optional Grenze prüfen) → nächstes Panorama suchen und anhängen
     const emit = async (pt) => {
       while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
       if (myGen !== gen) return false;
-      if (borderMode) { await borderCheck(pt); if (myGen !== gen) return false; }
+      if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
       const poi = poiMode ? nearbyPoi(pt) : null;
       await pushPano(pt, !!poi, poi ? 500 : undefined, poi ? poi.name : undefined);
       return true;
