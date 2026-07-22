@@ -20,6 +20,14 @@
   input:focus { outline:none; border-color:#4c7dff; }
   .settings { display:flex; gap:8px; }
   .settings > div { flex:1; }
+  .ac-wrap { position: relative; }
+  .ac-list { position: absolute; top: 100%; left: 0; right: 0; z-index: 30;
+    background: #11141b; border: 1px solid #4c7dff; border-top: 0;
+    border-radius: 0 0 8px 8px; max-height: 190px; overflow-y: auto; display: none; }
+  .ac-list.show { display: block; }
+  .ac-item { padding: 7px 9px; font-size: 12px; color: #e8ecf3; cursor: pointer; }
+  .ac-item:hover, .ac-item.active { background: #2a2f3a; }
+  .ac-item small { color: #9aa4b2; }
   #go { width:100%; margin-top:12px; padding:10px; border:0; border-radius:8px;
     background:#4c7dff; color:#fff; font-size:14px; font-weight:600; cursor:pointer; }
   #go:disabled { opacity:.5; cursor:default; }
@@ -93,9 +101,9 @@
   <label>Google Maps API-Key</label>
   <input id="key" type="password" placeholder="AIza…" autocomplete="off" />
   <label>Start</label>
-  <input id="start" value="Freiburg Münster" />
+  <div class="ac-wrap"><input id="start" autocomplete="off" value="Freiburg Münster" /><div class="ac-list" id="ac-start"></div></div>
   <label>Ziel</label>
-  <input id="end" value="Freiburg Hauptbahnhof" />
+  <div class="ac-wrap"><input id="end" autocomplete="off" value="Freiburg Hauptbahnhof" /><div class="ac-list" id="ac-end"></div></div>
 
   <details>
     <summary>Einstellungen</summary>
@@ -233,6 +241,67 @@
     if (!j.length) throw new Error("Nicht gefunden: " + address);
     return new google.maps.LatLng(+j[0].lat, +j[0].lon);
   }
+
+  // Ort auflösen: bevorzugt die per Autovervollständigung gewählten Koordinaten,
+  // sonst frei getippten Text via Nominatim geocoden.
+  async function resolveLocation(input) {
+    if (input._picked) return new google.maps.LatLng(input._picked.lat, input._picked.lng);
+    return geocode(input.value.trim());
+  }
+
+  // Keyless Autovervollständigung via Photon (OpenStreetMap, für Type-ahead gebaut)
+  function attachAutocomplete(input, listEl) {
+    let timer = null, items = [], active = -1;
+    const hide = () => { listEl.classList.remove("show"); active = -1; };
+    const render = () => {
+      listEl.innerHTML = "";
+      items.forEach((it, idx) => {
+        const div = document.createElement("div");
+        div.className = "ac-item" + (idx === active ? " active" : "");
+        div.textContent = it.main;
+        if (it.ctx) { const s = document.createElement("small"); s.textContent = " " + it.ctx; div.appendChild(s); }
+        div.addEventListener("mousedown", (e) => { e.preventDefault(); choose(idx); });
+        listEl.appendChild(div);
+      });
+      listEl.classList.toggle("show", items.length > 0);
+    };
+    const choose = (idx) => {
+      const it = items[idx]; if (!it) return;
+      input.value = it.label;
+      input._picked = { lat: it.lat, lng: it.lng };
+      hide();
+    };
+    async function query(q) {
+      try {
+        const r = await fetch("https://photon.komoot.io/api/?lang=de&limit=6&q=" + encodeURIComponent(q));
+        const j = await r.json();
+        items = (j.features || []).map((f) => {
+          const p = f.properties, c = f.geometry.coordinates;
+          const main = p.name || [p.street, p.housenumber].filter(Boolean).join(" ") || p.city || "?";
+          const ctx = [p.city, p.state, p.country].filter((x) => x && x !== main).join(", ");
+          return { main, ctx, label: main + (ctx ? ", " + ctx : ""), lat: c[1], lng: c[0] };
+        });
+        render();
+      } catch (e) { hide(); }
+    }
+    input.addEventListener("input", () => {
+      input._picked = null;
+      const q = input.value.trim();
+      clearTimeout(timer);
+      if (q.length < 3) { hide(); return; }
+      timer = setTimeout(() => query(q), 250);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (!listEl.classList.contains("show")) return;
+      if (e.key === "ArrowDown") { active = Math.min(items.length - 1, active + 1); render(); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { active = Math.max(0, active - 1); render(); e.preventDefault(); }
+      else if (e.key === "Enter" && active >= 0) { choose(active); e.preventDefault(); }
+      else if (e.key === "Escape") hide();
+    });
+    input.addEventListener("blur", () => setTimeout(hide, 150));
+  }
+  attachAutocomplete($("start"), $("ac-start"));
+  attachAutocomplete($("end"), $("ac-end"));
 
   // Router-Auswahl: ohne Meide-Option keyless über OSRM; mit Meide-Option über Google
   // (Directions API). Fällt bei Fehler (API nicht aktiv) sauber auf OSRM zurück.
@@ -572,9 +641,9 @@
         svService = new google.maps.StreetViewService();
       }
       setStatus("Suche Adressen & Route…");
-      const origin = await geocode($("start").value.trim());
+      const origin = await resolveLocation($("start"));
       await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
-      const destination = await geocode($("end").value.trim());
+      const destination = await resolveLocation($("end"));
       const route = await routePath(origin, destination);
       routePathCoords = route.path; // für die Linie auf der Mini-Karte
 
