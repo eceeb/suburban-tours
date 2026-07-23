@@ -25,7 +25,10 @@ Single self-contained file, no build step — just static HTML.
 - Live **OSM status** indicator (top-right): shows whether the OpenStreetMap
   lookups are loading, succeeding, or failing, with a success/fail counter.
 - Mini map (bottom-left) tracking the current position.
-- Local usage estimate (top-right) as a rough free-quota gauge.
+- Local usage estimate (top-right) as a rough free-quota gauge, with a warning
+  banner (and optional auto-stop) when the estimate crosses the free tier. This
+  is only an estimate — a hard quota cap in the Google Cloud Console is the only
+  real guarantee of $0.
 
 Routing and geocoding use the keyless **OSRM** and **Nominatim** services, so
 Google is only needed for the imagery (and, optionally, the avoid-route options).
