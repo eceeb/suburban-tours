@@ -72,6 +72,16 @@
   #usage.warn b { color: #ffb020; }
   #usage.over b { color: #ff8080; }
 
+  #osm {
+    position: fixed; top: 96px; right: 12px; z-index: 15; display: none;
+    background: rgba(18,21,28,.9); border: 1px solid #2a2f3a; border-radius: 8px;
+    padding: 5px 10px; font-size: 11px; color: #9aa4b2;
+  }
+  #osm .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: #6b7280; }
+  #osm.loading .dot { background: #ffb020; }
+  #osm.ok .dot { background: #2ec46b; }
+  #osm.offline .dot { background: #ff8080; }
+
   /* Menü einklappen */
   #collapse { position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
     border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 15px; line-height: 1; }
@@ -183,6 +193,7 @@
   <div id="miniZoom"><button id="miniIn" title="Zoom +">+</button><button id="miniOut" title="Zoom −">−</button></div>
 </div>
 <div id="usage"></div>
+<div id="osm" title="Status der OpenStreetMap-Abfragen (Sehenswürdigkeiten, Kreuzungen, Scenic Byways)"><span class="dot"></span><span id="osmTxt"></span></div>
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
@@ -228,6 +239,20 @@
     renderUsage();
   }
   renderUsage();
+
+  // Overpass/OSM-Status sichtbar machen — so sieht man live, ob die (unzuverlässigen)
+  // OSM-Abfragen gerade laufen, klappen oder ausfallen.
+  const osmState = { s: "idle", ok: 0, fail: 0 };
+  function renderOsm() {
+    const el = $("osm"); if (!el) return;
+    el.className = osmState.s;
+    el.style.display = osmState.s === "idle" ? "none" : "block";
+    const txt = { loading: "OSM: lädt…", ok: "OSM: ok", offline: "OSM: keine Antwort" }[osmState.s] || "";
+    $("osmTxt").textContent = txt + (osmState.ok || osmState.fail ? ` · ${osmState.ok}✓ ${osmState.fail}✗` : "");
+  }
+  const osmLoading = () => { osmState.s = "loading"; renderOsm(); };
+  const osmOk = () => { osmState.s = "ok"; osmState.ok++; renderOsm(); };
+  const osmFail = () => { osmState.s = "offline"; osmState.fail++; renderOsm(); };
 
   let mapsLoaded = false, panoA, svService, miniMap, miniMarker, routeLine = null, routePathCoords = [];
   let miniAutoZoom = true; // Auto-Zoom der Mini-Karte (aus, sobald der User manuell zoomt)
@@ -414,18 +439,35 @@
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.openstreetmap.ru/cgi/interpreter",
   ];
-  async function overpassQuery(q, perTimeout = 6000) {
-    for (const url of OVERPASS_MIRRORS) {
+  // Query-Schlüssel für den Cache (kleiner Hash über den Query-Text)
+  function ovpKey(q) { let h = 0; for (let i = 0; i < q.length; i++) h = (h * 31 + q.charCodeAt(i)) | 0; return "ovp:" + h; }
+  // Einen Mirror anfragen; wirft bei Fehler/Timeout/ungültig → für Promise.any zum Nächsten
+  function ovpTry(url, q, perTimeout) {
+    return new Promise(async (resolve, reject) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), perTimeout);
       try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), perTimeout);
         const r = await fetch(url, { method: "POST", body: q, signal: ctrl.signal });
         clearTimeout(t);
-        if (!r.ok) continue;
-        const j = JSON.parse(await r.text()); // XML-Fehlerantwort wirft → nächster Mirror
-        if (j && j.elements) return j;
-      } catch (e) { /* nächster Mirror */ }
-    }
+        if (!r.ok) return reject(new Error("HTTP " + r.status));
+        const j = JSON.parse(await r.text()); // XML-Fehlerantwort wirft → reject
+        if (j && j.elements) resolve(j); else reject(new Error("kein elements"));
+      } catch (e) { clearTimeout(t); reject(e); }
+    });
+  }
+  // Mehrere Mirrors GLEICHZEITIG anfragen — der erste mit gültiger Antwort gewinnt
+  // (statt nacheinander mit langem Warten). Zusätzlich Ergebnis-Cache in localStorage,
+  // damit dieselbe Strecke keine neuen Abfragen auslöst. Status wird live angezeigt.
+  async function overpassQuery(q, perTimeout = 6000) {
+    const ck = ovpKey(q);
+    try { const c = localStorage.getItem(ck); if (c) { osmOk(); return JSON.parse(c); } } catch (e) {}
+    osmLoading();
+    const wave = (urls) => Promise.any(urls.map((u) => ovpTry(u, q, perTimeout)));
+    let j = null;
+    try { j = await wave(OVERPASS_MIRRORS.slice(0, 3)); }
+    catch (e) { try { j = await wave(OVERPASS_MIRRORS.slice(3)); } catch (e2) {} }
+    if (j) { osmOk(); try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {} return j; }
+    osmFail();
     return null;
   }
 
