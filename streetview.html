@@ -165,6 +165,10 @@
       <input type="checkbox" id="avoidFerry" style="width:auto;" /> Fähren meiden
     </label>
     <div style="font-size:10px;color:#6b7280;margin-top:4px;">Meide-Optionen nutzen Google (Directions API nötig)</div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
+      <input type="checkbox" id="scenicRoute" style="width:auto;" /> Auf schöne Strecken routen (falls in der Nähe)
+    </label>
+    <div style="font-size:10px;color:#6b7280;margin-top:4px;">Baut nahe Scenic Byways als Umweg ein (max +40 %). Fragt vorab OSM ab → Start langsamer.</div>
   </details>
 
   <button id="go">Tour starten</button>
@@ -366,30 +370,32 @@
 
   // Router-Auswahl: ohne Meide-Option keyless über OSRM; mit Meide-Option über Google
   // (Directions API). Fällt bei Fehler (API nicht aktiv) sauber auf OSRM zurück.
-  async function routePath(origin, destination) {
+  async function routePath(origin, destination, waypoints) {
     const avoid = {
       avoidHighways: $("avoidHw").checked,
       avoidTolls: $("avoidToll").checked,
       avoidFerries: $("avoidFerry").checked,
     };
     if (avoid.avoidHighways || avoid.avoidTolls || avoid.avoidFerries) {
-      try { return await googleRoute(origin, destination, avoid); }
+      try { return await googleRoute(origin, destination, avoid, waypoints); }
       catch (e) {
         console.warn("Google-Routing fehlgeschlagen, nutze OSRM:", e.message || e);
         setStatus("Meide-Option braucht Directions API — nutze Normalroute", true);
         await sleep(1500);
       }
     }
-    return await osrmRoute(origin, destination);
+    return await osrmRoute(origin, destination, waypoints);
   }
 
-  // Google DirectionsService — kann Autobahnen/Maut/Fähren meiden (echte befahrbare Straßen)
-  async function googleRoute(origin, destination, avoid) {
+  // Google DirectionsService — kann Autobahnen/Maut/Fähren meiden (echte befahrbare Straßen).
+  // via (optional) = Zwischenpunkte, durch die die Route laufen soll (fürs Scenic-Routing).
+  async function googleRoute(origin, destination, avoid, via) {
     await google.maps.importLibrary("routes");
     const ds = new google.maps.DirectionsService();
     const res = await ds.route({
       origin, destination, travelMode: google.maps.TravelMode.DRIVING,
       avoidHighways: avoid.avoidHighways, avoidTolls: avoid.avoidTolls, avoidFerries: avoid.avoidFerries,
+      waypoints: (via || []).map((w) => ({ location: w, stopover: false })), // „via", kein Halt
     });
     const route = res.routes[0];
     // Dichte Geometrie aus den Step-Pfaden (nicht overview_path — der ist zu grob
@@ -405,13 +411,17 @@
     return { path, waypoints };
   }
 
-  // Keyless Routing via OSRM — dichter Fahr-Pfad + alle Kreuzungen/Knoten
-  async function osrmRoute(origin, destination) {
-    const url = "https://router.project-osrm.org/route/v1/driving/" +
-      `${origin.lng()},${origin.lat()};${destination.lng()},${destination.lat()}` +
+  // Keyless Routing via OSRM — dichter Fahr-Pfad + alle Kreuzungen/Knoten.
+  // via (optional) = Zwischenpunkte für die Route (fürs Scenic-Routing).
+  async function osrmRoute(origin, destination, via) {
+    const pts = [origin, ...(via || []), destination].map((p) => p.lng() + "," + p.lat()).join(";");
+    const url = "https://router.project-osrm.org/route/v1/driving/" + pts +
       "?overview=full&geometries=geojson&steps=true";
-    const r = await fetch(url);
-    const j = await r.json();
+    // Timeout — der öffentliche OSRM-Server kann hängen; ohne Abbruch würde „Tour starten" einfrieren.
+    const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 12000);
+    let j;
+    try { const r = await fetch(url, { signal: ctrl.signal }); j = await r.json(); }
+    finally { clearTimeout(to); }
     if (!j.routes || !j.routes.length) throw new Error("Keine Route gefunden.");
     const route = j.routes[0];
     const path = route.geometry.coordinates.map(([lng, lat]) => new google.maps.LatLng(lat, lng));
@@ -440,7 +450,7 @@
     "https://overpass.openstreetmap.ru/cgi/interpreter",
   ];
   // Query-Schlüssel für den Cache (kleiner Hash über den Query-Text)
-  function ovpKey(q) { let h = 0; for (let i = 0; i < q.length; i++) h = (h * 31 + q.charCodeAt(i)) | 0; return "ovp:" + h; }
+  function ovpKey(q) { let h = 0; for (let i = 0; i < q.length; i++) h = (h * 31 + q.charCodeAt(i)) | 0; return "ovp2:" + h; }
   // Einen Mirror anfragen; wirft bei Fehler/Timeout/ungültig → für Promise.any zum Nächsten
   function ovpTry(url, q, perTimeout) {
     return new Promise(async (resolve, reject) => {
@@ -455,18 +465,25 @@
       } catch (e) { clearTimeout(t); reject(e); }
     });
   }
-  // Mehrere Mirrors GLEICHZEITIG anfragen — der erste mit gültiger Antwort gewinnt
-  // (statt nacheinander mit langem Warten). Zusätzlich Ergebnis-Cache in localStorage,
-  // damit dieselbe Strecke keine neuen Abfragen auslöst. Status wird live angezeigt.
+  // Mehrere Mirrors GLEICHZEITIG anfragen. WICHTIG: manche Mirrors antworten mit
+  // HTTP 200, aber LEER (degradiert) — die dürfen ein Mirror mit echten Daten nicht
+  // verdrängen. Darum gewinnt die erste NICHT-LEERE Antwort sofort; nur wenn alle leer
+  // sind, kommt ein leeres Ergebnis zurück. Leeres wird NICHT gecacht (könnte transient
+  // sein). Ergebnis-Cache spart Wiederholungen; Status wird live angezeigt.
+  const wave = (urls, q, perTimeout) => new Promise((resolve) => {
+    let pending = urls.length, sawEmpty = false, done = false;
+    urls.forEach((u) => ovpTry(u, q, perTimeout)
+      .then((j) => { if (done) return; if (j.elements.length) { done = true; resolve(j); } else sawEmpty = true; })
+      .catch(() => {})
+      .finally(() => { if (--pending === 0 && !done) resolve(sawEmpty ? { elements: [] } : null); }));
+  });
   async function overpassQuery(q, perTimeout = 6000) {
     const ck = ovpKey(q);
     try { const c = localStorage.getItem(ck); if (c) { osmOk(); return JSON.parse(c); } } catch (e) {}
     osmLoading();
-    const wave = (urls) => Promise.any(urls.map((u) => ovpTry(u, q, perTimeout)));
-    let j = null;
-    try { j = await wave(OVERPASS_MIRRORS.slice(0, 3)); }
-    catch (e) { try { j = await wave(OVERPASS_MIRRORS.slice(3)); } catch (e2) {} }
-    if (j) { osmOk(); try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {} return j; }
+    let j = await wave(OVERPASS_MIRRORS.slice(0, 3), q, perTimeout);
+    if (!j || !j.elements.length) { const j2 = await wave(OVERPASS_MIRRORS.slice(3), q, perTimeout); if (j2 && j2.elements.length) j = j2; else j = j || j2; }
+    if (j) { osmOk(); if (j.elements.length) { try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {} } return j; }
     osmFail();
     return null;
   }
@@ -519,10 +536,10 @@
   // liegen in OSM als Geometrie vor. Wir holen sie im Korridor und liefern je Weg-Segment
   // einen Pfad + den Byway-Namen zurück → damit lässt sich erkennen, wann die Route auf
   // einer Byway läuft (kein echtes scenic-Routing, nur Anzeige).
-  async function fetchScenicForPoints(pts) {
+  async function fetchScenicForPoints(pts, radius = 1500) {
     const coords = pts.slice(0, 40).map((p) => p.lat().toFixed(5) + "," + p.lng().toFixed(5)).join(",");
     if (!coords) return [];
-    const q = `[out:json][timeout:25];relation(around:1500,${coords})[route=road][name~"Byway|Scenic",i];out geom 60;`;
+    const q = `[out:json][timeout:25];relation(around:${radius},${coords})[route=road][name~"Byway|Scenic",i];out geom 60;`;
     const j = await overpassQuery(q);
     if (!j) return [];
     const out = [];
@@ -536,6 +553,73 @@
       }
     }
     return out;
+  }
+
+  // Länge eines Pfads (Meter)
+  function pathLen(p) {
+    const s = google.maps.geometry.spherical; let d = 0;
+    for (let i = 1; i < p.length; i++) d += s.computeDistanceBetween(p[i - 1], p[i]);
+    return d;
+  }
+
+  // SCENIC-ROUTING (Umweg-Trick, kein echtes scenic-Routing): entlang der normalen
+  // Route nach nahen Scenic Byways suchen; die, die nah dran liegen und in Fahrtrichtung
+  // verlaufen, als Zwischenpunkte (Ein-/Ausstieg) einbauen → die neue Route macht den
+  // kleinen Schlenker über die Byway. Gibt {wps, names} zurück oder null.
+  const SCENIC_NEAR_M = 8000; // nur Byways, die höchstens so weit neben der Route liegen
+  async function findScenicWaypoints(path) {
+    const s = google.maps.geometry.spherical;
+    const cum = [0];
+    for (let i = 1; i < path.length; i++) cum[i] = cum[i - 1] + s.computeDistanceBetween(path[i - 1], path[i]);
+    // Korridor-Stichproben alle ~10 km (für die Overpass-Umkreissuche)
+    const sample = []; let next = 0;
+    for (let i = 0; i < path.length; i++) if (cum[i] >= next) { sample.push(path[i]); next += 10000; }
+    const segs = await fetchScenicForPoints(sample, SCENIC_NEAR_M);
+    if (!segs.length) return null;
+    // Segmente je Byway-Name sammeln
+    const byways = {};
+    for (const seg of segs) (byways[seg.name] = byways[seg.name] || []).push(...seg.path.map((p) => new google.maps.LatLng(p.lat, p.lng)));
+    // je Byway: Ein-/Ausstieg NUR über den Teil, der neben der Route verläuft (< NEAR_M).
+    // Wichtig bei langen Byways / Rundkursen (z.B. „Dinosaur Diamond"): sonst würde die
+    // Route um die ganze Schleife gezwungen. So folgt sie der Byway nur, wo sie eh nah ist.
+    const chosen = [];
+    for (const name in byways) {
+      let approach = Infinity, entryProg = Infinity, exitProg = -Infinity, entryPt = null, exitPt = null;
+      for (const p of byways[name]) {
+        let bd = Infinity, bi = 0;
+        for (let i = 0; i < path.length; i++) { const d = s.computeDistanceBetween(p, path[i]); if (d < bd) { bd = d; bi = i; } }
+        if (bd < approach) approach = bd;
+        if (bd < SCENIC_NEAR_M) { // nur der route-nahe Abschnitt zählt für Ein-/Ausstieg
+          if (cum[bi] < entryProg) { entryProg = cum[bi]; entryPt = p; }
+          if (cum[bi] > exitProg) { exitProg = cum[bi]; exitPt = p; }
+        }
+      }
+      if (approach < SCENIC_NEAR_M && entryPt && exitProg - entryProg > 1000) chosen.push({ name, approach, entryProg, exitProg, entryPt, exitPt });
+    }
+    if (!chosen.length) return null;
+    chosen.sort((a, b) => a.entryProg - b.entryProg); // Reihenfolge entlang der Route
+    const wps = [], names = []; let last = -1;
+    for (const c of chosen) {
+      if (c.entryProg < last) continue; // Überlappung → überspringen (Route bleibt monoton)
+      wps.push(c.entryPt, c.exitPt); names.push(c.name); last = c.exitProg;
+      if (wps.length >= 10) break; // Google-Waypoint-Limit im Blick behalten
+    }
+    return { wps, names };
+  }
+  // Auf schöne Strecken routen: findet Byways, routet neu darüber; wird die Route zu
+  // lang (Umweg-Deckel), erst nur die nächste Byway, sonst normal. Gibt neue Route + Namen.
+  async function applyScenicRouting(origin, destination, base) {
+    const found = await findScenicWaypoints(base.path);
+    if (!found) return null;
+    const baseLen = pathLen(base.path), CAP = 1.4; // höchstens +40 % Umweg
+    for (const wps of [found.wps, found.wps.slice(0, 2)]) { // alle Byways, sonst nur die nächste
+      if (!wps.length) continue;
+      try {
+        const r = await routePath(origin, destination, wps);
+        if (pathLen(r.path) <= baseLen * CAP) return { route: r, names: found.names };
+      } catch (e) {}
+    }
+    return null;
   }
 
   // Panoramen werden LAZY entlang der Route gesucht — immer nur ein paar voraus,
@@ -1025,7 +1109,13 @@
       const origin = await resolveLocation($("start"));
       await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
       const destination = await resolveLocation($("end"));
-      const route = await routePath(origin, destination);
+      let route = await routePath(origin, destination);
+      if ($("scenicRoute").checked) {
+        setStatus("Suche schöne Strecken in der Nähe…");
+        const scenic = await applyScenicRouting(origin, destination, route);
+        if (scenic) { route = scenic.route; setStatus("Schöne Strecke eingebaut: " + scenic.names.join(", ")); await sleep(900); }
+        else setStatus("Keine passende schöne Strecke in der Nähe.");
+      }
       routePathCoords = route.path; // für die Linie auf der Mini-Karte
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
