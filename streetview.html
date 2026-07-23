@@ -82,6 +82,16 @@
   #osm.ok .dot { background: #2ec46b; }
   #osm.offline .dot { background: #ff8080; }
 
+  #limitWarn {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30; display: none;
+    background: rgba(120,20,20,.96); border: 1px solid #ff8080; color: #fff; border-radius: 10px;
+    padding: 10px 14px; font-size: 13px; line-height: 1.4; max-width: 540px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  #limitWarn.show { display: block; }
+  #limitWarn button { margin-left: 8px; border: 0; border-radius: 6px; padding: 4px 9px; cursor: pointer; font-size: 12px; }
+  #limitGo { background: #3a3f4a; color: #fff; }
+  #limitClose { background: #ff8080; color: #300; }
+
   /* Menü einklappen */
   #collapse { position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
     border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 15px; line-height: 1; }
@@ -169,6 +179,10 @@
       <input type="checkbox" id="scenicRoute" style="width:auto;" /> Auf schöne Strecken routen (falls in der Nähe)
     </label>
     <div style="font-size:10px;color:#6b7280;margin-top:4px;">Baut nahe Scenic Byways als Umweg ein (max +40 %). Fragt vorab OSM ab → Start langsamer.</div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
+      <input type="checkbox" id="stopAtLimit" checked style="width:auto;" /> Bei geschätztem Gratis-Limit anhalten
+    </label>
+    <div style="font-size:10px;color:#6b7280;margin-top:4px;">Nur eine Schätzung! Echte 0-€-Garantie gibt nur ein hartes Limit in der Google Cloud Console.</div>
   </details>
 
   <button id="go">Tour starten</button>
@@ -198,6 +212,7 @@
 </div>
 <div id="usage"></div>
 <div id="osm" title="Status der OpenStreetMap-Abfragen (Sehenswürdigkeiten, Kreuzungen, Scenic Byways)"><span class="dot"></span><span id="osmTxt"></span></div>
+<div id="limitWarn"><span id="limitMsg"></span><button id="limitGo">trotzdem weiter</button><button id="limitClose">ok</button></div>
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
@@ -237,10 +252,26 @@
     el.innerHTML = `Street-View-Anfragen (geschätzt)<br>diesen Monat: <b>${o.count}</b><br>` +
       (left > 0 ? `gratis übrig: ~<b>${left}</b>` : `<b>Gratis-Limit erreicht</b>`);
   }
+  // Limit-Warnung: der Browser kennt die ECHTE Abrechnung nicht — nur unsere Schätzung.
+  // Beim (geschätzten) Überschreiten warnen und optional die Tour anhalten, damit nicht
+  // unbemerkt Anfragen weiterlaufen. Echte 0-€-Garantie nur über das Cloud-Console-Limit.
+  let limitHalted = false;   // in dieser Session schon einmal wegen Limit angehalten
+  let limitOverride = false;  // Nutzer hat „trotzdem weiter" gewählt
+  function showLimit(msg) { $("limitMsg").innerHTML = msg; $("limitWarn").classList.add("show"); }
   function bumpUsage(n) {
-    const o = getUsage(); o.count += n;
+    const o = getUsage(); const before = o.count; o.count += n;
     localStorage.setItem("svUsage", JSON.stringify(o));
     renderUsage();
+    if (before < FREE_PER_MONTH && o.count >= FREE_PER_MONTH && !limitHalted && !limitOverride) {
+      limitHalted = true;
+      if ($("stopAtLimit").checked) {
+        gen++; running = false; // Producer + Wiedergabe anhalten
+        showLimit("⚠️ Geschätztes Gratis-Limit erreicht (~" + FREE_PER_MONTH + "). Tour angehalten, damit nichts kostet.");
+        setStatus("Angehalten am geschätzten Gratis-Limit.", true);
+      } else {
+        showLimit("⚠️ Geschätztes Gratis-Limit erreicht — weitere Anfragen könnten Geld kosten.");
+      }
+    }
   }
   renderUsage();
 
@@ -1086,9 +1117,18 @@
   $("collapse").addEventListener("click", () => { $("panel").classList.add("hidden"); $("menuToggle").classList.add("show"); });
   $("menuToggle").addEventListener("click", () => { $("panel").classList.remove("hidden"); $("menuToggle").classList.remove("show"); });
 
+  // Banner-Buttons: „trotzdem weiter" hebt die Limit-Bremse für diese Session auf.
+  $("limitClose").addEventListener("click", () => $("limitWarn").classList.remove("show"));
+  $("limitGo").addEventListener("click", () => { limitOverride = true; limitHalted = false; $("limitWarn").classList.remove("show"); });
+
   $("go").addEventListener("click", async () => {
     const key = $("key").value.trim();
     if (!key) return setStatus("Bitte API-Key eingeben.", true);
+    // Am geschätzten Gratis-Limit nicht einfach lostouren (könnte kosten) — erst bestätigen.
+    if (getUsage().count >= FREE_PER_MONTH && !limitOverride) {
+      if (!confirm("Geschätztes Gratis-Limit erreicht (~" + FREE_PER_MONTH + " Anfragen). Weitere Touren könnten Geld kosten.\n\nNur ein hartes Limit in der Google Cloud Console garantiert wirklich 0 €.\n\nTrotzdem starten?")) return;
+      limitOverride = true;
+    }
     gen++; // alte Tour (Producer + Wiedergabe) sauber stilllegen
     running = false;
     localStorage.setItem("gmapsKey", key);
