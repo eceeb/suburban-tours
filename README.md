@@ -35,6 +35,10 @@ Single self-contained file, no build step — just static HTML.
 
 Routing and geocoding use the keyless **OSRM** and **Nominatim** services, so
 Google is only needed for the imagery (and, optionally, the avoid-route options).
+For resilience, routing races two public OSRM servers (whichever answers first
+wins) and both routes and geocodes are cached locally, so the same trip doesn't
+re-hit the flaky public services. Overpass (POIs/junctions/byways) likewise
+races several mirrors, prefers a non-empty answer, and caches results.
 
 ## Running
 
