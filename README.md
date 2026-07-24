@@ -17,7 +17,10 @@ Single self-contained file, no build step — just static HTML.
 - Route options: **avoid highways / tolls / ferries** (via Google Directions;
   falls back to the normal route if that API isn't enabled).
 - **Scenic byways:** detects when the route runs on a named scenic byway (from
-  OpenStreetMap route relations) and shows a green bar with its name.
+  OpenStreetMap route relations) and turns the control bar teal (distinct from
+  the green border bar) for the whole stretch, with the byway's name.
+- Control bar always shows **current US state · distance travelled · elevation**
+  (elevation via the keyless open-meteo API).
 - **Route via scenic byways (optional):** if a scenic byway runs close to the
   normal route, it's woven in as via-waypoints so the drive follows it — capped
   at +40 % extra distance, otherwise dropped. Uses OSM (queried up front, so the

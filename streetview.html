@@ -46,6 +46,8 @@
   }
   #controls.show { display: flex; }
   #controls.special { background: rgba(20,110,60,.95); border-color: #2ec46b; box-shadow: 0 0 0 2px rgba(46,196,107,.4), 0 8px 30px rgba(0,0,0,.5); }
+  /* Scenic Byway: eigene Farbe (Türkis), damit man es von der Grenze (grün) unterscheidet */
+  #controls.special.scenicbar { background: rgba(15,95,120,.95); border-color: #2ec4d8; box-shadow: 0 0 0 2px rgba(46,196,216,.4), 0 8px 30px rgba(0,0,0,.5); }
   #pause { border:0; background:#4c7dff; color:#fff; width:38px; height:38px;
     border-radius:50%; font-size:15px; cursor:pointer; flex:0 0 auto; }
   #controls .speed { display:flex; align-items:center; gap:8px; }
@@ -54,6 +56,8 @@
   #prog { color:#9aa4b2; font-variant-numeric: tabular-nums; min-width:56px; text-align:right; }
   #specialLabel { color:#fff; font-size:12px; font-weight:600; max-width:180px;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #info { color:#c3cad6; font-size:12px; font-variant-numeric: tabular-nums; white-space:nowrap; }
+  #info:empty { display:none; }
 
   #minimap {
     position: fixed; left: 12px; bottom: 16px; z-index: 15;
@@ -227,6 +231,7 @@
     <span>langsam</span>
   </div>
   <span id="specialLabel"></span>
+  <span id="info"></span>
   <div id="prog"></div>
 </div>
 
@@ -782,11 +787,11 @@
       poiFetching = false;
     }
 
-    const pushPano = async (pt, special, rad, label, distM) => {
+    const pushPano = async (pt, special, rad, label, distM, kind) => {
       const loc = await nearestPano(pt, rad || radius);
       if (loc && !seen.has(loc.pano) && (special || onRoute(loc.latLng))) {
         seen.add(loc.pano);
-        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null, distM });
+        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null, distM, kind: kind || null });
       }
     };
 
@@ -796,7 +801,7 @@
       const loc = await nearestPano(pointAtDistance(crossM), 150);
       if (!loc || seen.has(loc.pano)) return;
       seen.add(loc.pano);
-      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM };
+      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind: "border" };
       let idx = panoList.length;
       for (let k = Math.max(consumerIdx + 1, 0); k < panoList.length; k++) {
         if (panoList[k].distM != null && panoList[k].distM > crossM) { idx = k; break; }
@@ -827,9 +832,9 @@
       if (myGen !== gen) return false;
       if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
       const poi = poiMode ? nearbyPoi(pt) : null;
-      let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined;
-      if (!special && scenicMode) { const sb = onScenicByway(pt); if (sb) { special = true; label = "Scenic Byway: " + sb; } }
-      await pushPano(pt, special, rad, label, distM);
+      let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined, kind = poi ? "poi" : null;
+      if (!special && scenicMode) { const sb = onScenicByway(pt); if (sb) { special = true; label = "Scenic Byway: " + sb; kind = "scenic"; } }
+      await pushPano(pt, special, rad, label, distM, kind);
       return true;
     };
 
@@ -1006,6 +1011,32 @@
 
   // Zoom passend zur Distanz zum nächsten Stopp: Stadt (klein) → eng, Autobahn (groß) → weit
   const zoomForDist = (d) => Math.max(10, Math.min(17, Math.round(16 - Math.log2(Math.max(30, d) / 30))));
+
+  // Info-Zeile in der Leiste: Bundesstaat · zurückgelegte km · Höhe.
+  // Höhe keyless über open-meteo (gratis, kein Google-Key), pro Gegend nur einmal geholt.
+  let elevText = "", elevKey = null, elevBusy = false, lastInfoIt = null;
+  function renderBarInfo(it) {
+    if (!it) return;
+    const parts = [];
+    const st = stateOf(it.latLng);            // "US|Colorado" → "Colorado" (nur USA)
+    if (st) parts.push(st.split("|")[1]);
+    if (it.distM != null) parts.push(Math.round(it.distM / 1000) + " km");
+    if (elevText) parts.push(elevText);
+    $("info").textContent = parts.join(" · ");
+  }
+  async function maybeElevation(ll) {
+    const key = ll.lat().toFixed(2) + "," + ll.lng().toFixed(2); // ~1 km Raster → selten abfragen
+    if (key === elevKey || elevBusy) return;
+    elevKey = key; elevBusy = true;
+    try {
+      const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${ll.lat().toFixed(4)}&longitude=${ll.lng().toFixed(4)}`, { signal: ctrl.signal });
+      clearTimeout(t);
+      const j = await r.json();
+      if (j && Array.isArray(j.elevation) && j.elevation[0] != null) { elevText = "~" + Math.round(j.elevation[0]) + " m"; renderBarInfo(lastInfoIt); }
+    } catch (e) { /* Höhe ist optional — bei Fehler einfach weglassen */ }
+    elevBusy = false;
+  }
   function updateMini(idx) {
     const it = panoList[idx];
     if (!it || !miniMarker) return;
@@ -1014,9 +1045,13 @@
       miniMap.setCenter(it.latLng); // Karte folgt der aktuellen Position
       if (miniAutoZoom) miniMap.setZoom(zoomForDist(distAt(idx)));
     }
-    // Steuerleiste grün + Label, wenn hier etwas Besonderes ist (Grenze / POI)
+    // Steuerleiste einfärben: Grenze/POI grün (special), Scenic Byway türkis (scenicbar)
     $("controls").classList.toggle("special", !!it.border);
+    $("controls").classList.toggle("scenicbar", it.kind === "scenic");
     $("specialLabel").textContent = it.border && it.label ? it.label : "";
+    lastInfoIt = it;
+    renderBarInfo(it);
+    maybeElevation(it.latLng);
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
@@ -1145,6 +1180,7 @@
         panoA = new google.maps.StreetViewPanorama($("panoA"), opts);
         svService = new google.maps.StreetViewService();
       }
+      loadStateBoundaries(); // Bundesstaat-Polygone laden (für die Info-Zeile), nicht-blockierend
       setStatus("Suche Adressen & Route…");
       const origin = await resolveLocation($("start"));
       await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
