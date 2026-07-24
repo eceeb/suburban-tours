@@ -411,15 +411,17 @@
   attachAutocomplete($("start"), $("ac-start"));
   attachAutocomplete($("end"), $("ac-end"));
 
-  // Router-Auswahl: ohne Meide-Option keyless über OSRM; mit Meide-Option über Google
-  // (Directions API). Fällt bei Fehler (API nicht aktiv) sauber auf OSRM zurück.
+  // Router-Auswahl: ohne Meide-Option keyless über OSRM (zwei Server); mit Meide-Option
+  // über Google (Directions API), fällt bei Fehler auf OSRM zurück. Sind BEIDE OSRM-Server
+  // down, kann Google als Notfall-Router einspringen — aber nur nach Rückfrage (kostet evtl.).
   async function routePath(origin, destination, waypoints) {
     const avoid = {
       avoidHighways: $("avoidHw").checked,
       avoidTolls: $("avoidToll").checked,
       avoidFerries: $("avoidFerry").checked,
     };
-    if (avoid.avoidHighways || avoid.avoidTolls || avoid.avoidFerries) {
+    const useGoogle = avoid.avoidHighways || avoid.avoidTolls || avoid.avoidFerries;
+    if (useGoogle) {
       try { return await googleRoute(origin, destination, avoid, waypoints); }
       catch (e) {
         console.warn("Google-Routing fehlgeschlagen, nutze OSRM:", e.message || e);
@@ -427,7 +429,14 @@
         await sleep(1500);
       }
     }
-    return await osrmRoute(origin, destination, waypoints);
+    try { return await osrmRoute(origin, destination, waypoints); }
+    catch (e) {
+      // Beide Gratis-Router down → Google nur als bestätigter Notfall (kann kosten)
+      if (!useGoogle && confirm("Beide Gratis-Router (OSRM) sind gerade nicht erreichbar.\n\nGoogle als Ausweich-Router nutzen? Das kann ein paar Cent kosten (Directions API).")) {
+        return await googleRoute(origin, destination, avoid, waypoints);
+      }
+      throw new Error("Kein Router erreichbar — bitte gleich nochmal probieren.");
+    }
   }
 
   // Google DirectionsService — kann Autobahnen/Maut/Fähren meiden (echte befahrbare Straßen).
