@@ -333,13 +333,20 @@
     mapsLoaded = true;
   }
 
-  // Keyless Geocoding via Nominatim (OpenStreetMap) — kein Google nötig
+  // Keyless Geocoding via Nominatim (OpenStreetMap) — kein Google nötig.
+  // Mit Timeout + Ergebnis-Cache (gleiche Adresse → kein neuer Call), da Nominatim
+  // rate-limitiert und mal langsam ist.
   async function geocode(address) {
+    const ck = "geo:" + address.toLowerCase();
+    try { const c = localStorage.getItem(ck); if (c) { const o = JSON.parse(c); return new google.maps.LatLng(o.lat, o.lng); } } catch (e) {}
     const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
       encodeURIComponent(address);
-    const r = await fetch(url, { headers: { "Accept-Language": "de" } });
-    const j = await r.json();
+    const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 8000);
+    let j;
+    try { const r = await fetch(url, { headers: { "Accept-Language": "de" }, signal: ctrl.signal }); j = await r.json(); }
+    finally { clearTimeout(to); }
     if (!j.length) throw new Error("Nicht gefunden: " + address);
+    try { localStorage.setItem(ck, JSON.stringify({ lat: +j[0].lat, lng: +j[0].lon })); } catch (e) {}
     return new google.maps.LatLng(+j[0].lat, +j[0].lon);
   }
 
@@ -448,17 +455,33 @@
   }
 
   // Keyless Routing via OSRM — dichter Fahr-Pfad + alle Kreuzungen/Knoten.
-  // via (optional) = Zwischenpunkte für die Route (fürs Scenic-Routing).
+  // Zwei öffentliche Server; beide werden GLEICHZEITIG gefragt, der erste gültige gewinnt
+  // (ein einzelner Server hängt/fällt zu oft aus). Ergebnis wird gecacht → gleiche Strecke
+  // ohne neuen Call. via (optional) = Zwischenpunkte (fürs Scenic-Routing).
+  const OSRM_MIRRORS = [
+    "https://router.project-osrm.org/route/v1/driving/",
+    "https://routing.openstreetmap.de/routed-car/route/v1/driving/",
+  ];
+  async function osrmFetch(base, pts, perTimeout) {
+    const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), perTimeout);
+    try {
+      const r = await fetch(base + pts + "?overview=full&geometries=geojson&steps=true", { signal: ctrl.signal });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      if (!j.routes || !j.routes.length) throw new Error("keine Route");
+      return j;
+    } finally { clearTimeout(to); }
+  }
   async function osrmRoute(origin, destination, via) {
     const pts = [origin, ...(via || []), destination].map((p) => p.lng() + "," + p.lat()).join(";");
-    const url = "https://router.project-osrm.org/route/v1/driving/" + pts +
-      "?overview=full&geometries=geojson&steps=true";
-    // Timeout — der öffentliche OSRM-Server kann hängen; ohne Abbruch würde „Tour starten" einfrieren.
-    const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 12000);
-    let j;
-    try { const r = await fetch(url, { signal: ctrl.signal }); j = await r.json(); }
-    finally { clearTimeout(to); }
-    if (!j.routes || !j.routes.length) throw new Error("Keine Route gefunden.");
+    const ck = "osrm:" + pts;
+    let j = null;
+    try { const c = localStorage.getItem(ck); if (c) j = JSON.parse(c); } catch (e) {}
+    if (!j) {
+      try { j = await Promise.any(OSRM_MIRRORS.map((b) => osrmFetch(b, pts, 12000))); }
+      catch (e) { throw new Error("Keine Route gefunden (Router gerade nicht erreichbar)."); }
+      try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {}
+    }
     const route = j.routes[0];
     const path = route.geometry.coordinates.map(([lng, lat]) => new google.maps.LatLng(lat, lng));
     // ALLE Kreuzungen/Knoten entlang der Route (auch Ausfahrten, an denen man vorbeifährt)
