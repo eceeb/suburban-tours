@@ -1064,8 +1064,10 @@
       const lng = data?.location?.latLng?.lng?.() ?? panoList[curIdx].latLng.lng();
       const imageDate = data?.imageDate || "";
       const place = data?.location?.description || (lat.toFixed(4) + ", " + lng.toFixed(4));
-      const url = `https://maps.googleapis.com/maps/api/streetview?size=640x400&pano=${pano}` +
-        `&heading=${Math.round(pov.heading)}&pitch=${Math.round(pov.pitch)}&fov=${fov}&scale=2&key=${key}`;
+      // 640x640 = das Maximum der Static API (größere size wird serverseitig gestutzt,
+      // scale wird ignoriert — mit einem einzelnen Bild geht nicht mehr).
+      const url = `https://maps.googleapis.com/maps/api/streetview?size=640x640&pano=${pano}` +
+        `&heading=${Math.round(pov.heading)}&pitch=${Math.round(pov.pitch)}&fov=${fov}&key=${key}`;
       const r = await fetch(url); bumpUsage(1);
       if (!r.ok) throw new Error("Static API HTTP " + r.status);
       const blob = await r.blob();
@@ -1082,6 +1084,8 @@
     for (const p of photos) {
       const card = document.createElement("div"); card.className = "gal-card";
       const img = document.createElement("img"); img.src = URL.createObjectURL(p.blob); img.loading = "lazy";
+      img.style.cursor = "zoom-in"; img.title = "In voller Größe öffnen";
+      img.onclick = () => window.open(URL.createObjectURL(p.blob), "_blank"); // volle Auflösung anzeigen
       const cap = document.createElement("div"); cap.className = "gal-cap";
       cap.textContent = (p.imageDate ? "📅 " + p.imageDate + " · " : "") + p.place;
       const row = document.createElement("div"); row.className = "gal-actions";
