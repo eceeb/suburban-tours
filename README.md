@@ -9,8 +9,9 @@ Single self-contained file, no build step — just static HTML.
 - Guided Street View tour along a real driving route.
 - Smooth dolly-zoom between panoramas (zoom scales with the gap, so the next
   frame lines up) plus damped heading so the view stays forward, not wobbly.
-- **Pause + free look:** pause to drag around and mouse-wheel zoom; resume
-  continues from where you were looking.
+- **Pause + free look & walk:** pause to drag around and mouse-wheel zoom, and
+  move panorama-to-panorama by clicking the road or with the ↑/↓ arrow keys — no
+  Google navigation-arrow overlay. Resume continues from where you were looking.
 - **Live speed / dwell** control.
 - **Navi mode:** stop at every junction, with a capped max jump (e.g. 10 km on
   a highway between exits).
