@@ -138,7 +138,10 @@
     background: #12151c; border: 1px solid #2a2f3a; border-radius: 12px; padding: 16px; }
   #galPanel h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; color:#e8ecf3; }
   #galClose { border: 0; background: #2a2f3a; color: #e8ecf3; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
-  .gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
+  .gal-country { font-size: 14px; font-weight: 700; color: #e8ecf3; margin: 14px 0 2px; }
+  .gal-country:first-child { margin-top: 0; }
+  .gal-region { font-size: 12px; color: #9aa4b2; margin: 6px 0 8px; padding-left: 4px; }
+  .gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; margin-bottom: 6px; }
   .gal-card { background: #0e1116; border: 1px solid #22262f; border-radius: 8px; overflow: hidden; }
   .gal-card img { width: 100%; height: 120px; object-fit: cover; display: block; }
   .gal-cap { font-size: 11px; color: #c3cad6; padding: 6px 8px; line-height: 1.3; }
@@ -227,7 +230,7 @@
 <div id="galPanel">
   <div class="box">
     <h2>🖼 Galerie <button id="galClose" title="Schließen">×</button></h2>
-    <div id="galList" class="gal-grid"></div>
+    <div id="galList"></div>
   </div>
 </div>
 
@@ -982,6 +985,39 @@
     if (p) refreshFav();
   }
 
+  // Street-View-Viewer einmalig anlegen (wird von Tour UND Einzelansicht genutzt)
+  function ensurePano() {
+    if (!panoA) {
+      panoA = new google.maps.StreetViewPanorama($("panoA"), {
+        visible: true, motionTracking: false, motionTrackingControl: false,
+        addressControl: false, showRoadLabels: false, fullscreenControl: false,
+        disableDefaultUI: true, clickToGo: false, scrollwheel: true, // Mausrad-Zoom (Pause)
+      });
+      svService = new google.maps.StreetViewService();
+    }
+  }
+
+  // Einen einzelnen Ort im Viewer öffnen (z.B. aus den Favoriten) — Pause-Modus,
+  // frei umsehen und 📷 fotografieren, ohne eine ganze Tour zu fahren.
+  async function viewLocation(pano, lat, lng) {
+    const key = $("key").value.trim() || localStorage.getItem("gmapsKey");
+    if (!key) return setStatus("Bitte API-Key eingeben.", true);
+    setStatus("Öffne Ort…");
+    await loadGoogleMaps(key);
+    ensurePano();
+    loadStateBoundaries();
+    gen++; running = false;                 // evtl. laufende Tour stilllegen
+    $("favPanel").classList.remove("show");
+    $("panel").classList.add("hidden"); $("menuToggle").classList.add("show");
+    panoList = [{ pano, latLng: new google.maps.LatLng(lat, lng), border: false, label: null, distM: 0, kind: null }];
+    curIdx = 0; shownIdx = 0; tourPano = panoA;
+    panoA.setPano(pano); bumpUsage(1);
+    panoA.setPov({ heading: 0, pitch: 0, zoom: 0 });
+    $("controls").classList.add("show");
+    setPause(true);                          // Pause → 📷 & Werkzeuge sichtbar
+    setStatus("Ort geöffnet — umsehen & 📷 fotografieren.");
+  }
+
   // --- Favoriten (lokale Ablage im Browser) ---
   const FAV_KEY = "svFavorites";
   const getFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } };
@@ -1018,13 +1054,15 @@
       const row = document.createElement("div"); row.className = "fav-row";
       const lbl = document.createElement("div"); lbl.className = "lbl";
       lbl.textContent = f.label || (f.lat.toFixed(4) + ", " + f.lng.toFixed(4));
+      const view = document.createElement("button"); view.textContent = "👁"; view.title = "Im Viewer öffnen (fotografieren)";
+      view.onclick = () => viewLocation(f.pano, f.lat, f.lng);
       const dest = document.createElement("button"); dest.textContent = "→ Ziel";
       dest.onclick = () => { const e = $("end"); e.value = f.label || ""; e._picked = { lat: f.lat, lng: f.lng }; $("favPanel").classList.remove("show"); };
       const open = document.createElement("button"); open.textContent = "🔗";
       open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${f.lat},${f.lng}`, "_blank");
       const del = document.createElement("button"); del.textContent = "×";
       del.onclick = () => { saveFavs(getFavs().filter((x) => x.pano !== f.pano)); renderFavList(); };
-      row.append(lbl, dest, open, del);
+      row.append(lbl, view, dest, open, del);
       list.appendChild(row);
     });
   }
@@ -1033,9 +1071,10 @@
   $("favPanel").addEventListener("click", (e) => { if (e.target === $("favPanel")) $("favPanel").classList.remove("show"); });
   updateFavCount();
 
-  // FOTOS — echtes JPEG der aktuellen Blickrichtung aus der Street View Static API
-  // (kein Screenshot). Lokal in IndexedDB (die DB des Browsers, bleibt erhalten), plus
-  // Download-Button pro Foto (eine Browser-Seite darf nicht selbst in den Ordner schreiben).
+  // FOTOS — bevorzugt der LIVE-Viewer-Canvas in voller Fensterauflösung (kein 640-Limit,
+  // keine extra API-Anfrage, exakt die aktuelle Ansicht). Nur wenn der Canvas nicht lesbar
+  // ist, Fallback auf die Static API (640×640, 1 Anfrage). Lokal in IndexedDB (bleibt
+  // erhalten), plus Download-Button (eine Browser-Seite darf nicht selbst in den Ordner schreiben).
   const PHOTO_DB = "svPhotoDB", PHOTO_STORE = "photos";
   function photoDB() {
     return new Promise((res, rej) => {
@@ -1050,54 +1089,110 @@
   async function photoDel(id) { const db = await photoDB(); return new Promise((res, rej) => { const tx = db.transaction(PHOTO_STORE, "readwrite"); tx.objectStore(PHOTO_STORE).delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
   async function updateGalCount() { try { $("galBtn").textContent = `🖼 Galerie (${(await photoAll()).length})`; } catch (e) {} }
 
+  // Land + Region zu einem Punkt (für die Galerie-Ordner): USA lokal über die
+  // Bundesstaat-Polygone, sonst best-effort keyless per Photon-Reverse.
+  async function geoRegion(lat, lng) {
+    const st = stateOf(new google.maps.LatLng(lat, lng)); // "US|Colorado"
+    if (st) return { country: "USA", region: st.split("|")[1] };
+    try {
+      const p = (await (await fetch(`https://photon.komoot.io/reverse?lon=${lng}&lat=${lat}`)).json()).features?.[0]?.properties;
+      if (p) return { country: p.country || "Unbekannt", region: p.state || p.county || p.city || "—" };
+    } catch (e) {}
+    return { country: "Unbekannt", region: "—" };
+  }
+
+  // Einen frisch gerenderten Offscreen-Viewer in voller Auflösung abgreifen. Der LIVE-Viewer
+  // liefert im Pause/Idle einen gelöschten (schwarzen) WebGL-Puffer — ein frischer rendert
+  // stabil mit Inhalt. Wir warten und pollen, bis das Bild nicht mehr leer ist (Byte-Größe).
+  function captureOffscreen(pano, pov, w, h) {
+    const dpr = window.devicePixelRatio || 1;
+    if (w * dpr > 4096) { const s = 4096 / (w * dpr); w = Math.floor(w * s); h = Math.floor(h * s); } // WebGL-Limit
+    return new Promise((resolve) => {
+      const div = document.createElement("div");
+      div.style.cssText = `position:fixed;left:-99999px;top:0;width:${w}px;height:${h}px;`;
+      document.body.appendChild(div);
+      new google.maps.StreetViewPanorama(div, { pano, pov, visible: true, disableDefaultUI: true, motionTracking: false });
+      let tries = 0;
+      const grab = async () => {
+        const cs = [...div.querySelectorAll("canvas")];
+        const main = cs.reduce((a, b) => (b.width * b.height > (a ? a.width * a.height : 0) ? b : a), null);
+        if (main) {
+          const blob = await new Promise((r) => main.toBlob(r, "image/jpeg", 0.92));
+          if (blob && blob.size > 15000) { div.remove(); resolve({ blob, dim: main.width + "×" + main.height }); return; } // nicht leer
+        }
+        if (++tries > 10) { div.remove(); resolve(null); return; }
+        setTimeout(grab, 500);
+      };
+      setTimeout(grab, 1500);
+    });
+  }
+
   async function capturePhoto() {
     if (!tourPano) return;
     const pano = tourPano.getPano(); if (!pano) return;
-    const pov = tourPano.getPov(), zoom = tourPano.getZoom ? tourPano.getZoom() : 1;
-    const fov = Math.max(20, Math.min(120, Math.round(180 / Math.pow(2, zoom || 1)))); // Zoom → Blickwinkel
-    const key = $("key").value.trim() || localStorage.getItem("gmapsKey");
-    setStatus("Foto wird geholt…");
+    const pov = tourPano.getPov(), zoom = tourPano.getZoom ? tourPano.getZoom() : 0;
+    setStatus("Foto wird aufgenommen…");
+    // Aufnahmedatum + Ortsname aus den Panorama-Metadaten
+    const data = await new Promise((r) => svService.getPanorama({ pano }, (d, s) => r(s === "OK" ? d : null)));
+    const lat = data?.location?.latLng?.lat?.() ?? panoList[curIdx].latLng.lat();
+    const lng = data?.location?.latLng?.lng?.() ?? panoList[curIdx].latLng.lng();
+    const imageDate = data?.imageDate || "";
+    const place = data?.location?.description || (lat.toFixed(4) + ", " + lng.toFixed(4));
+    const reg = await geoRegion(lat, lng); // Land + Region für die Galerie-Ordner
+    const save = async (blob, source) => {
+      await photoAdd({ blob, lat, lng, imageDate, place, country: reg.country, region: reg.region, heading: Math.round(pov.heading), pitch: Math.round(pov.pitch), ts: Date.now() });
+      updateGalCount();
+      setStatus("Foto gespeichert 📷 " + (imageDate ? "(" + imageDate + ") " : "") + source);
+    };
+    // 1) Offscreen in voller Fensterauflösung (kein 640-Limit) — kostet 1 Panorama-Ladevorgang
     try {
-      // Aufnahmedatum + Ortsname aus den Panorama-Metadaten
-      const data = await new Promise((r) => svService.getPanorama({ pano }, (d, s) => r(s === "OK" ? d : null)));
-      const lat = data?.location?.latLng?.lat?.() ?? panoList[curIdx].latLng.lat();
-      const lng = data?.location?.latLng?.lng?.() ?? panoList[curIdx].latLng.lng();
-      const imageDate = data?.imageDate || "";
-      const place = data?.location?.description || (lat.toFixed(4) + ", " + lng.toFixed(4));
-      // 640x640 = das Maximum der Static API (größere size wird serverseitig gestutzt,
-      // scale wird ignoriert — mit einem einzelnen Bild geht nicht mehr).
+      const shot = await captureOffscreen(pano, { heading: pov.heading, pitch: pov.pitch, zoom }, innerWidth, innerHeight);
+      if (shot) { bumpUsage(1); await save(shot.blob, shot.dim); return; }
+    } catch (e) { /* → Static-API-Fallback */ }
+    // 2) Fallback: Static API (640×640, kostet 1 Anfrage)
+    try {
+      const key = $("key").value.trim() || localStorage.getItem("gmapsKey");
+      const fov = Math.max(20, Math.min(120, Math.round(180 / Math.pow(2, zoom || 1))));
       const url = `https://maps.googleapis.com/maps/api/streetview?size=640x640&pano=${pano}` +
         `&heading=${Math.round(pov.heading)}&pitch=${Math.round(pov.pitch)}&fov=${fov}&key=${key}`;
       const r = await fetch(url); bumpUsage(1);
       if (!r.ok) throw new Error("Static API HTTP " + r.status);
-      const blob = await r.blob();
-      await photoAdd({ blob, lat, lng, imageDate, place, heading: Math.round(pov.heading), pitch: Math.round(pov.pitch), fov, ts: Date.now() });
-      updateGalCount();
-      setStatus("Foto gespeichert 📷 (" + (imageDate || "?") + ")");
+      await save(await r.blob(), "640×640");
     } catch (e) { setStatus("Foto fehlgeschlagen: " + (e.message || e), true); }
   }
 
+  function makeGalCard(p) {
+    const card = document.createElement("div"); card.className = "gal-card";
+    const img = document.createElement("img"); img.src = URL.createObjectURL(p.blob); img.loading = "lazy";
+    img.style.cursor = "zoom-in"; img.title = "In voller Größe öffnen";
+    img.onclick = () => window.open(URL.createObjectURL(p.blob), "_blank"); // volle Auflösung anzeigen
+    const cap = document.createElement("div"); cap.className = "gal-cap";
+    cap.textContent = (p.imageDate ? "📅 " + p.imageDate + " · " : "") + p.place;
+    const row = document.createElement("div"); row.className = "gal-actions";
+    const dl = document.createElement("button"); dl.textContent = "⬇︎"; dl.title = "Herunterladen";
+    dl.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(p.blob); a.download = `suburban-${(p.country || "")}-${(p.region || "")}-${p.imageDate || "foto"}.jpg`.replace(/\s+/g, "_"); a.click(); };
+    const open = document.createElement("button"); open.textContent = "🔗"; open.title = "In Google Maps";
+    open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${p.lat},${p.lng}`, "_blank");
+    const del = document.createElement("button"); del.textContent = "×"; del.title = "Löschen";
+    del.onclick = async () => { await photoDel(p.id); renderGallery(); updateGalCount(); };
+    row.append(dl, open, del);
+    card.append(img, cap, row);
+    return card;
+  }
   async function renderGallery() {
     const list = $("galList"), photos = (await photoAll()).sort((a, b) => b.ts - a.ts);
     if (!photos.length) { list.innerHTML = '<div class="fav-empty">Noch keine Fotos. Im Pause-Modus mit 📷 aufnehmen.</div>'; return; }
+    // Ordner: Land → Region
+    const tree = {};
+    for (const p of photos) { const c = p.country || "Unbekannt", r = p.region || "—"; ((tree[c] = tree[c] || {})[r] = tree[c][r] || []).push(p); }
     list.innerHTML = "";
-    for (const p of photos) {
-      const card = document.createElement("div"); card.className = "gal-card";
-      const img = document.createElement("img"); img.src = URL.createObjectURL(p.blob); img.loading = "lazy";
-      img.style.cursor = "zoom-in"; img.title = "In voller Größe öffnen";
-      img.onclick = () => window.open(URL.createObjectURL(p.blob), "_blank"); // volle Auflösung anzeigen
-      const cap = document.createElement("div"); cap.className = "gal-cap";
-      cap.textContent = (p.imageDate ? "📅 " + p.imageDate + " · " : "") + p.place;
-      const row = document.createElement("div"); row.className = "gal-actions";
-      const dl = document.createElement("button"); dl.textContent = "⬇︎"; dl.title = "Herunterladen";
-      dl.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(p.blob); a.download = `suburban-${p.imageDate || "foto"}-${p.lat.toFixed(4)}_${p.lng.toFixed(4)}.jpg`; a.click(); };
-      const open = document.createElement("button"); open.textContent = "🔗"; open.title = "In Google Maps";
-      open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${p.lat},${p.lng}`, "_blank");
-      const del = document.createElement("button"); del.textContent = "×"; del.title = "Löschen";
-      del.onclick = async () => { await photoDel(p.id); renderGallery(); updateGalCount(); };
-      row.append(dl, open, del);
-      card.append(img, cap, row);
-      list.appendChild(card);
+    for (const country of Object.keys(tree).sort()) {
+      const ch = document.createElement("div"); ch.className = "gal-country"; ch.textContent = "🌍 " + country; list.appendChild(ch);
+      for (const region of Object.keys(tree[country]).sort()) {
+        const rh = document.createElement("div"); rh.className = "gal-region"; rh.textContent = "📍 " + region + " (" + tree[country][region].length + ")"; list.appendChild(rh);
+        const grid = document.createElement("div"); grid.className = "gal-grid"; list.appendChild(grid);
+        for (const p of tree[country][region]) grid.appendChild(makeGalCard(p));
+      }
     }
   }
   $("photo").addEventListener("click", capturePhoto);
@@ -1298,15 +1393,7 @@
     try {
       setStatus("Lade Google Maps…");
       await loadGoogleMaps(key);
-      if (!panoA) {
-        const opts = {
-          visible: true, motionTracking: false, motionTrackingControl: false,
-          addressControl: false, showRoadLabels: false, fullscreenControl: false,
-          disableDefaultUI: true, clickToGo: false, scrollwheel: true, // Mausrad-Zoom (v.a. im Pause-Modus)
-        };
-        panoA = new google.maps.StreetViewPanorama($("panoA"), opts);
-        svService = new google.maps.StreetViewService();
-      }
+      ensurePano();
       loadStateBoundaries(); // Bundesstaat-Polygone laden (für die Info-Zeile), nicht-blockierend
       setStatus("Suche Adressen & Route…");
       const origin = await resolveLocation($("start"));

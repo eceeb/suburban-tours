@@ -27,12 +27,17 @@ Single self-contained file, no build step — just static HTML.
   start is slower) and only detours to byways that are genuinely nearby.
 - Live **OSM status** indicator (top-right): shows whether the OpenStreetMap
   lookups are loading, succeeding, or failing, with a success/fail counter.
-- **Photos:** in pause mode, 📷 grabs the current view as a real JPEG from the
-  Street View Static API (not a screenshot), tagged with Google's capture date
+- **Photos:** in pause mode, 📷 grabs the current view as a real JPEG at full
+  window resolution (rendered off-screen from the live Street View viewer, not a
+  screenshot and not the 640 px Static API), tagged with Google's capture date
   and the location. Photos are stored locally in the browser's IndexedDB and
-  shown in a **gallery** view, each with a download button. (A static web page
-  can't write into the project folder itself, so "local" means IndexedDB +
-  manual download.)
+  shown in a **gallery** grouped into country → region folders, each with a
+  download button and click-to-open-full-size. Falls back to the 640×640 Static
+  API if the off-screen capture fails. (A static web page can't write into the
+  project folder itself, so "local" means IndexedDB + manual download.)
+- **Open a favourite in the viewer:** the 👁 button on a saved favourite opens
+  that exact spot in the Street View viewer (paused, free-look) so you can look
+  around and take photos there without driving a whole tour.
 - Mini map (bottom-left) tracking the current position.
 - Local usage estimate (top-right) as a rough free-quota gauge, with a warning
   banner (and optional auto-stop) when the estimate crosses the free tier. This
