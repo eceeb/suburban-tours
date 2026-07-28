@@ -27,6 +27,12 @@ Single self-contained file, no build step — just static HTML.
   start is slower) and only detours to byways that are genuinely nearby.
 - Live **OSM status** indicator (top-right): shows whether the OpenStreetMap
   lookups are loading, succeeding, or failing, with a success/fail counter.
+- **Photos:** in pause mode, 📷 grabs the current view as a real JPEG from the
+  Street View Static API (not a screenshot), tagged with Google's capture date
+  and the location. Photos are stored locally in the browser's IndexedDB and
+  shown in a **gallery** view, each with a download button. (A static web page
+  can't write into the project folder itself, so "local" means IndexedDB +
+  manual download.)
 - Mini map (bottom-left) tracking the current position.
 - Local usage estimate (top-right) as a rough free-quota gauge, with a warning
   banner (and optional auto-stop) when the estimate crosses the free tier. This

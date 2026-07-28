@@ -131,6 +131,19 @@
   .fav-row .lbl { flex: 1; font-size: 12px; color: #e8ecf3; line-height: 1.3; }
   .fav-row button { border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 12px; padding: 5px 7px; white-space: nowrap; }
   .fav-empty { color: #9aa4b2; font-size: 12px; }
+
+  #galPanel { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(8,10,14,.6); }
+  #galPanel.show { display: flex; align-items: center; justify-content: center; }
+  #galPanel .box { width: 620px; max-width: calc(100vw - 24px); max-height: 80vh; overflow-y: auto;
+    background: #12151c; border: 1px solid #2a2f3a; border-radius: 12px; padding: 16px; }
+  #galPanel h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; color:#e8ecf3; }
+  #galClose { border: 0; background: #2a2f3a; color: #e8ecf3; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
+  .gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
+  .gal-card { background: #0e1116; border: 1px solid #22262f; border-radius: 8px; overflow: hidden; }
+  .gal-card img { width: 100%; height: 120px; object-fit: cover; display: block; }
+  .gal-cap { font-size: 11px; color: #c3cad6; padding: 6px 8px; line-height: 1.3; }
+  .gal-actions { display: flex; gap: 4px; padding: 0 8px 8px; }
+  .gal-actions button { flex: 1; border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 12px; padding: 4px; }
 </style>
 
 <div id="panoA" class="stage"></div>
@@ -191,6 +204,7 @@
 
   <button id="go">Tour starten</button>
   <button id="favBtn">★ Favoriten</button>
+  <button id="galBtn">🖼 Galerie</button>
   <div id="status"></div>
 
   <div class="hint">
@@ -210,6 +224,13 @@
   </div>
 </div>
 
+<div id="galPanel">
+  <div class="box">
+    <h2>🖼 Galerie <button id="galClose" title="Schließen">×</button></h2>
+    <div id="galList" class="gal-grid"></div>
+  </div>
+</div>
+
 <div id="minimap">
   <div id="minimap-inner"></div>
   <div id="miniZoom"><button id="miniIn" title="Zoom +">+</button><button id="miniOut" title="Zoom −">−</button></div>
@@ -223,6 +244,7 @@
   <span id="pauseTools">
     <button id="back" title="Vorheriger Stopp">◀</button>
     <button id="fav" title="Als Favorit merken">★</button>
+    <button id="photo" title="Foto aufnehmen">📷</button>
     <button id="openmaps" title="In Google Maps öffnen">🔗</button>
   </span>
   <div class="speed">
@@ -1010,6 +1032,75 @@
   $("favClose").addEventListener("click", () => $("favPanel").classList.remove("show"));
   $("favPanel").addEventListener("click", (e) => { if (e.target === $("favPanel")) $("favPanel").classList.remove("show"); });
   updateFavCount();
+
+  // FOTOS — echtes JPEG der aktuellen Blickrichtung aus der Street View Static API
+  // (kein Screenshot). Lokal in IndexedDB (die DB des Browsers, bleibt erhalten), plus
+  // Download-Button pro Foto (eine Browser-Seite darf nicht selbst in den Ordner schreiben).
+  const PHOTO_DB = "svPhotoDB", PHOTO_STORE = "photos";
+  function photoDB() {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open(PHOTO_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(PHOTO_STORE, { keyPath: "id", autoIncrement: true });
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+  async function photoAdd(rec) { const db = await photoDB(); return new Promise((res, rej) => { const tx = db.transaction(PHOTO_STORE, "readwrite"); tx.objectStore(PHOTO_STORE).add(rec); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+  async function photoAll() { const db = await photoDB(); return new Promise((res, rej) => { const r = db.transaction(PHOTO_STORE, "readonly").objectStore(PHOTO_STORE).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+  async function photoDel(id) { const db = await photoDB(); return new Promise((res, rej) => { const tx = db.transaction(PHOTO_STORE, "readwrite"); tx.objectStore(PHOTO_STORE).delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+  async function updateGalCount() { try { $("galBtn").textContent = `🖼 Galerie (${(await photoAll()).length})`; } catch (e) {} }
+
+  async function capturePhoto() {
+    if (!tourPano) return;
+    const pano = tourPano.getPano(); if (!pano) return;
+    const pov = tourPano.getPov(), zoom = tourPano.getZoom ? tourPano.getZoom() : 1;
+    const fov = Math.max(20, Math.min(120, Math.round(180 / Math.pow(2, zoom || 1)))); // Zoom → Blickwinkel
+    const key = $("key").value.trim() || localStorage.getItem("gmapsKey");
+    setStatus("Foto wird geholt…");
+    try {
+      // Aufnahmedatum + Ortsname aus den Panorama-Metadaten
+      const data = await new Promise((r) => svService.getPanorama({ pano }, (d, s) => r(s === "OK" ? d : null)));
+      const lat = data?.location?.latLng?.lat?.() ?? panoList[curIdx].latLng.lat();
+      const lng = data?.location?.latLng?.lng?.() ?? panoList[curIdx].latLng.lng();
+      const imageDate = data?.imageDate || "";
+      const place = data?.location?.description || (lat.toFixed(4) + ", " + lng.toFixed(4));
+      const url = `https://maps.googleapis.com/maps/api/streetview?size=640x400&pano=${pano}` +
+        `&heading=${Math.round(pov.heading)}&pitch=${Math.round(pov.pitch)}&fov=${fov}&scale=2&key=${key}`;
+      const r = await fetch(url); bumpUsage(1);
+      if (!r.ok) throw new Error("Static API HTTP " + r.status);
+      const blob = await r.blob();
+      await photoAdd({ blob, lat, lng, imageDate, place, heading: Math.round(pov.heading), pitch: Math.round(pov.pitch), fov, ts: Date.now() });
+      updateGalCount();
+      setStatus("Foto gespeichert 📷 (" + (imageDate || "?") + ")");
+    } catch (e) { setStatus("Foto fehlgeschlagen: " + (e.message || e), true); }
+  }
+
+  async function renderGallery() {
+    const list = $("galList"), photos = (await photoAll()).sort((a, b) => b.ts - a.ts);
+    if (!photos.length) { list.innerHTML = '<div class="fav-empty">Noch keine Fotos. Im Pause-Modus mit 📷 aufnehmen.</div>'; return; }
+    list.innerHTML = "";
+    for (const p of photos) {
+      const card = document.createElement("div"); card.className = "gal-card";
+      const img = document.createElement("img"); img.src = URL.createObjectURL(p.blob); img.loading = "lazy";
+      const cap = document.createElement("div"); cap.className = "gal-cap";
+      cap.textContent = (p.imageDate ? "📅 " + p.imageDate + " · " : "") + p.place;
+      const row = document.createElement("div"); row.className = "gal-actions";
+      const dl = document.createElement("button"); dl.textContent = "⬇︎"; dl.title = "Herunterladen";
+      dl.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(p.blob); a.download = `suburban-${p.imageDate || "foto"}-${p.lat.toFixed(4)}_${p.lng.toFixed(4)}.jpg`; a.click(); };
+      const open = document.createElement("button"); open.textContent = "🔗"; open.title = "In Google Maps";
+      open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${p.lat},${p.lng}`, "_blank");
+      const del = document.createElement("button"); del.textContent = "×"; del.title = "Löschen";
+      del.onclick = async () => { await photoDel(p.id); renderGallery(); updateGalCount(); };
+      row.append(dl, open, del);
+      card.append(img, cap, row);
+      list.appendChild(card);
+    }
+  }
+  $("photo").addEventListener("click", capturePhoto);
+  $("galBtn").addEventListener("click", () => { renderGallery(); $("galPanel").classList.add("show"); });
+  $("galClose").addEventListener("click", () => $("galPanel").classList.remove("show"));
+  $("galPanel").addEventListener("click", (e) => { if (e.target === $("galPanel")) $("galPanel").classList.remove("show"); });
+  updateGalCount();
 
   // Aktuelle Stelle im echten Google Maps / Street View öffnen
   function openInMaps() {
