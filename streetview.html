@@ -58,6 +58,10 @@
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #info { color:#c3cad6; font-size:12px; font-variant-numeric: tabular-nums; white-space:nowrap; }
   #info:empty { display:none; }
+  #radioBtn { border:0; background:#2a2f3a; color:#e8ecf3; width:34px; height:34px; border-radius:50%; font-size:15px; cursor:pointer; flex:0 0 auto; }
+  #radioBtn.on { background:#2ec46b; color:#08130c; }
+  #radioLabel { color:#8fd6a8; font-size:11px; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #radioLabel:empty { display:none; }
 
   #minimap {
     position: fixed; left: 12px; bottom: 16px; z-index: 15;
@@ -244,6 +248,7 @@
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
+  <button id="radioBtn" title="Lokales Radio an/aus">📻</button>
   <span id="pauseTools">
     <button id="back" title="Vorheriger Stopp">◀</button>
     <button id="fav" title="Als Favorit merken">★</button>
@@ -257,8 +262,10 @@
   </div>
   <span id="specialLabel"></span>
   <span id="info"></span>
+  <span id="radioLabel"></span>
   <div id="prog"></div>
 </div>
+<audio id="radio"></audio>
 
 <script>
   const $ = (id) => document.getElementById(id);
@@ -1010,6 +1017,7 @@
     renderBarInfo({ latLng: pos, distM: null });
     maybeElevation(pos);
     refreshFav();
+    updateRadioForCurrent();
   }
   // Ein Panorama in Blickrichtung weitergehen (forward) bzw. zurück — über die
   // Nachbar-Verknüpfungen (getLinks), ohne Googles Pfeil-Overlay.
@@ -1020,6 +1028,53 @@
     let best = null, bd = 1e9;
     for (const l of links) { const d = Math.abs(((l.heading - h + 540) % 360) - 180); if (d < bd) { bd = d; best = l; } }
     if (best && best.pano) { tourPano.setPano(best.pano); bumpUsage(1); }
+  }
+
+  // --- Lokales Radio (keyless via Radio-Browser-DB) ---
+  // Spielt den meistgehörten Sender des aktuellen Bundesstaats (bzw. Landes) und wechselt
+  // automatisch, sobald man in einen neuen Staat fährt. Start braucht einen Klick (Autoplay).
+  let radioOn = false, radioKey = null, radioBusy = false;
+  function showRadio(txt) { $("radioLabel").textContent = txt ? "📻 " + txt : ""; }
+  async function pickStations(reg) {
+    const base = "https://de1.api.radio-browser.info/json/stations/search?order=votes&reverse=true&limit=15&hidebroken=true";
+    const url = reg.cc === "US"
+      ? base + "&countrycode=US&state=" + encodeURIComponent(reg.state)
+      : base + "&country=" + encodeURIComponent(reg.country || "");
+    try {
+      const list = await (await fetch(url)).json();
+      return list.filter((s) => s.url_resolved).map((s) => ({ name: s.name.trim(), url: s.url_resolved }));
+    } catch (e) { return []; }
+  }
+  async function updateRadioForCurrent() {
+    if (!radioOn || radioBusy) return;
+    const it = curPano(); if (!it) return;
+    const st = stateOf(it.latLng); // "US|Colorado"
+    const reg = st ? { cc: "US", state: st.split("|")[1] } : { cc: null, country: (await geoRegion(it.latLng.lat(), it.latLng.lng())).country };
+    const key = reg.cc === "US" ? "US|" + reg.state : (reg.country || "?");
+    if (key === radioKey) return; // gleicher Staat → weiterlaufen lassen
+    radioKey = key; radioBusy = true;
+    showRadio("suche Sender…");
+    const stations = (await pickStations(reg)).slice(0, 6); // Top 6 nach Stimmen
+    const a = $("radio"), region = reg.state || reg.country || "";
+    // Sender der Reihe nach probieren, bis einer wirklich spielt/lädt
+    for (const s of stations) {
+      if (!radioOn || radioKey !== key) break; // abgeschaltet oder Staat gewechselt
+      const ok = await new Promise((resolve) => {
+        let done = false; const fin = (v) => { if (!done) { done = true; a.onplaying = a.oncanplay = a.onerror = null; clearTimeout(t); resolve(v); } };
+        const t = setTimeout(() => fin(false), 4000);
+        a.onplaying = () => fin(true); a.oncanplay = () => fin(true); a.onerror = () => fin(false);
+        a.src = s.url; a.play().catch(() => {});
+      });
+      if (ok) { showRadio(s.name + " · " + region); radioBusy = false; return; }
+    }
+    if (radioOn && radioKey === key) showRadio(stations.length ? "kein spielbarer Sender (" + region + ")" : "kein Sender für " + region);
+    radioBusy = false;
+  }
+  function toggleRadio() {
+    radioOn = !radioOn;
+    $("radioBtn").classList.toggle("on", radioOn);
+    if (radioOn) { radioKey = null; updateRadioForCurrent(); }
+    else { $("radio").pause(); $("radio").removeAttribute("src"); showRadio(""); }
   }
 
   // Einen einzelnen Ort im Viewer öffnen (z.B. aus den Favoriten) — Pause-Modus,
@@ -1307,6 +1362,7 @@
     lastInfoIt = it;
     renderBarInfo(it);
     maybeElevation(it.latLng);
+    updateRadioForCurrent(); // Sender wechseln, wenn ein neuer Bundesstaat erreicht ist
   }
 
   // Ein Viewer, on-the-fly. Zwischen verbundenen Panoramen blendet Google selbst über
@@ -1399,6 +1455,7 @@
   }
 
   $("pause").addEventListener("click", () => setPause(!paused));
+  $("radioBtn").addEventListener("click", toggleRadio);
   $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
   $("fav").addEventListener("click", toggleFav);
   // Pfeiltasten im Pause-Modus: ↑ ein Panorama vorwärts (Blickrichtung), ↓ zurück
