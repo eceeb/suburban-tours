@@ -39,10 +39,10 @@ Single self-contained file, no build step — just static HTML.
 - **Open a favourite in the viewer:** the 👁 button on a saved favourite opens
   that exact spot in the Street View viewer (paused, free-look) so you can look
   around and take photos there without driving a whole tour.
-- **Local radio (📻):** streams the top-voted station for the state/region you
-  are currently in (keyless, via the Radio-Browser community DB) and switches
-  automatically when you cross into a new state. Starting it needs one click
-  (browser autoplay policy); it tries the top few stations until one plays.
+- **Local radio (📻):** streams a local station for the state/region you are
+  currently in (keyless, via the Radio-Browser community DB) and switches
+  automatically when you cross into a new state. **Click** to turn on / hop to
+  the next station (shown as `n/total`); **right-click** to turn off.
 - Mini map (bottom-left) tracking the current position.
 - Local usage estimate (top-right) as a rough free-quota gauge, with a warning
   banner (and optional auto-stop) when the estimate crosses the free tier. This
