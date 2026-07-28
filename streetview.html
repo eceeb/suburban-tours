@@ -248,7 +248,7 @@
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
-  <button id="radioBtn" title="Lokales Radio an/aus">📻</button>
+  <button id="radioBtn" title="Radio: Klick = nächster Sender · Rechtsklick = aus">📻</button>
   <span id="pauseTools">
     <button id="back" title="Vorheriger Stopp">◀</button>
     <button id="fav" title="Als Favorit merken">★</button>
@@ -1031,12 +1031,12 @@
   }
 
   // --- Lokales Radio (keyless via Radio-Browser-DB) ---
-  // Spielt den meistgehörten Sender des aktuellen Bundesstaats (bzw. Landes) und wechselt
-  // automatisch, sobald man in einen neuen Staat fährt. Start braucht einen Klick (Autoplay).
-  let radioOn = false, radioKey = null, radioBusy = false;
+  // Spielt einen lokalen Sender des aktuellen Bundesstaats (bzw. Landes) und wechselt
+  // automatisch beim Staatswechsel. Klick = nächster Sender (an, falls aus), Rechtsklick = aus.
+  let radioOn = false, radioKey = null, radioBusy = false, radioStations = [], radioIdx = -1, radioRegion = "";
   function showRadio(txt) { $("radioLabel").textContent = txt ? "📻 " + txt : ""; }
   async function pickStations(reg) {
-    const base = "https://de1.api.radio-browser.info/json/stations/search?order=votes&reverse=true&limit=15&hidebroken=true";
+    const base = "https://de1.api.radio-browser.info/json/stations/search?order=votes&reverse=true&limit=25&hidebroken=true";
     const url = reg.cc === "US"
       ? base + "&countrycode=US&state=" + encodeURIComponent(reg.state)
       : base + "&country=" + encodeURIComponent(reg.country || "");
@@ -1045,6 +1045,24 @@
       return list.filter((s) => s.url_resolved).map((s) => ({ name: s.name.trim(), url: s.url_resolved }));
     } catch (e) { return []; }
   }
+  // Ab Index startIdx (mit Umlauf) den nächsten Sender suchen, der wirklich spielt/lädt
+  async function radioPlayFrom(startIdx) {
+    const a = $("radio"), n = radioStations.length;
+    if (!n) { showRadio("kein Sender für " + radioRegion); return false; }
+    for (let k = 0; k < n; k++) {
+      if (!radioOn) return false;
+      const i = ((startIdx + k) % n + n) % n, s = radioStations[i];
+      const ok = await new Promise((resolve) => {
+        let done = false; const fin = (v) => { if (!done) { done = true; a.onplaying = a.oncanplay = a.onerror = null; clearTimeout(t); resolve(v); } };
+        const t = setTimeout(() => fin(false), 4000);
+        a.onplaying = () => fin(true); a.oncanplay = () => fin(true); a.onerror = () => fin(false);
+        a.src = s.url; a.play().catch(() => {});
+      });
+      if (ok) { radioIdx = i; showRadio(s.name + " · " + radioRegion + "  (" + (i + 1) + "/" + n + ")"); return true; }
+    }
+    showRadio("kein spielbarer Sender (" + radioRegion + ")"); return false;
+  }
+  // Automatischer Wechsel bei neuem Staat (aus updateMini/freeMove)
   async function updateRadioForCurrent() {
     if (!radioOn || radioBusy) return;
     const it = curPano(); if (!it) return;
@@ -1052,29 +1070,23 @@
     const reg = st ? { cc: "US", state: st.split("|")[1] } : { cc: null, country: (await geoRegion(it.latLng.lat(), it.latLng.lng())).country };
     const key = reg.cc === "US" ? "US|" + reg.state : (reg.country || "?");
     if (key === radioKey) return; // gleicher Staat → weiterlaufen lassen
-    radioKey = key; radioBusy = true;
+    radioKey = key; radioRegion = reg.state || reg.country || ""; radioBusy = true;
     showRadio("suche Sender…");
-    const stations = (await pickStations(reg)).slice(0, 6); // Top 6 nach Stimmen
-    const a = $("radio"), region = reg.state || reg.country || "";
-    // Sender der Reihe nach probieren, bis einer wirklich spielt/lädt
-    for (const s of stations) {
-      if (!radioOn || radioKey !== key) break; // abgeschaltet oder Staat gewechselt
-      const ok = await new Promise((resolve) => {
-        let done = false; const fin = (v) => { if (!done) { done = true; a.onplaying = a.oncanplay = a.onerror = null; clearTimeout(t); resolve(v); } };
-        const t = setTimeout(() => fin(false), 4000);
-        a.onplaying = () => fin(true); a.oncanplay = () => fin(true); a.onerror = () => fin(false);
-        a.src = s.url; a.play().catch(() => {});
-      });
-      if (ok) { showRadio(s.name + " · " + region); radioBusy = false; return; }
-    }
-    if (radioOn && radioKey === key) showRadio(stations.length ? "kein spielbarer Sender (" + region + ")" : "kein Sender für " + region);
+    radioStations = await pickStations(reg); radioIdx = -1;
+    await radioPlayFrom(0);
     radioBusy = false;
   }
-  function toggleRadio() {
-    radioOn = !radioOn;
-    $("radioBtn").classList.toggle("on", radioOn);
-    if (radioOn) { radioKey = null; updateRadioForCurrent(); }
-    else { $("radio").pause(); $("radio").removeAttribute("src"); showRadio(""); }
+  // Klick auf 📻: einschalten, sonst zum nächsten Sender wechseln
+  async function radioClick() {
+    if (!radioOn) { radioOn = true; $("radioBtn").classList.add("on"); radioKey = null; await updateRadioForCurrent(); return; }
+    if (radioBusy || !radioStations.length) return;
+    radioBusy = true; showRadio("nächster Sender…");
+    await radioPlayFrom(radioIdx + 1);
+    radioBusy = false;
+  }
+  function radioOff() {
+    radioOn = false; $("radioBtn").classList.remove("on");
+    $("radio").pause(); $("radio").removeAttribute("src"); showRadio("");
   }
 
   // Einen einzelnen Ort im Viewer öffnen (z.B. aus den Favoriten) — Pause-Modus,
@@ -1455,7 +1467,8 @@
   }
 
   $("pause").addEventListener("click", () => setPause(!paused));
-  $("radioBtn").addEventListener("click", toggleRadio);
+  $("radioBtn").addEventListener("click", radioClick);
+  $("radioBtn").addEventListener("contextmenu", (e) => { e.preventDefault(); radioOff(); });
   $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
   $("fav").addEventListener("click", toggleFav);
   // Pfeiltasten im Pause-Modus: ↑ ein Panorama vorwärts (Blickrichtung), ↓ zurück
