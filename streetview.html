@@ -982,6 +982,9 @@
     paused = p;
     $("pause").textContent = p ? "▶" : "⏸";
     $("controls").classList.toggle("paused", p); // Pause-Werkzeuge ein/aus
+    // Im Pause-Modus frei gehen (Klick auf die Straße), sonst aus, damit die Tour nicht
+    // auf Klicks reagiert. Die Pfeil-Overlays bleiben dank disableDefaultUI aus.
+    if (panoA) panoA.setOptions({ clickToGo: p });
     if (p) refreshFav();
   }
 
@@ -994,7 +997,29 @@
         disableDefaultUI: true, clickToGo: false, scrollwheel: true, // Mausrad-Zoom (Pause)
       });
       svService = new google.maps.StreetViewService();
+      // Freies Gehen im Pause-Modus (Klick/Tasten wechselt das Panorama) → Karte/Info/★ mitziehen
+      panoA.addListener("pano_changed", () => { if (paused) freeMove(); });
     }
+  }
+  // Nach freiem Wechsel im Pause-Modus: aktuelle Position auf Karte/Info/★ spiegeln
+  function freeMove() {
+    const pos = tourPano && tourPano.getPosition && tourPano.getPosition();
+    if (!pos) return;
+    if (miniMarker) miniMarker.setPosition(pos);
+    if (miniMap) miniMap.setCenter(pos);
+    renderBarInfo({ latLng: pos, distM: null });
+    maybeElevation(pos);
+    refreshFav();
+  }
+  // Ein Panorama in Blickrichtung weitergehen (forward) bzw. zurück — über die
+  // Nachbar-Verknüpfungen (getLinks), ohne Googles Pfeil-Overlay.
+  function walk(forward) {
+    if (!tourPano || !tourPano.getLinks) return;
+    const links = tourPano.getLinks() || []; if (!links.length) return;
+    const h = tourPano.getPov().heading + (forward ? 0 : 180);
+    let best = null, bd = 1e9;
+    for (const l of links) { const d = Math.abs(((l.heading - h + 540) % 360) - 180); if (d < bd) { bd = d; best = l; } }
+    if (best && best.pano) { tourPano.setPano(best.pano); bumpUsage(1); }
   }
 
   // Einen einzelnen Ort im Viewer öffnen (z.B. aus den Favoriten) — Pause-Modus,
@@ -1023,8 +1048,16 @@
   const getFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } };
   const isFav = (panoId) => getFavs().some((f) => f.pano === panoId);
   const saveFavs = (favs) => { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); refreshFav(); updateFavCount(); };
+  // aktuelles Panorama live (nach freiem Gehen korrekt), sonst der Tour-Stopp
+  function curPano() {
+    if (tourPano && tourPano.getPano && tourPano.getPano()) {
+      const pos = tourPano.getPosition && tourPano.getPosition();
+      if (pos) return { pano: tourPano.getPano(), latLng: pos };
+    }
+    return panoList[curIdx] || null;
+  }
   async function toggleFav() {
-    const it = panoList[curIdx]; if (!it) return;
+    const it = curPano(); if (!it) return;
     const favs = getFavs(), at = favs.findIndex((f) => f.pano === it.pano);
     if (at >= 0) { favs.splice(at, 1); saveFavs(favs); return; }
     const lat = it.latLng.lat(), lng = it.latLng.lng();
@@ -1042,7 +1075,7 @@
     saveFavs(favs);
   }
   function refreshFav() {
-    const it = panoList[curIdx];
+    const it = curPano();
     if (it) $("fav").classList.toggle("on", isFav(it.pano));
   }
   const updateFavCount = () => { $("favBtn").textContent = `★ Favoriten (${getFavs().length})`; };
@@ -1368,6 +1401,13 @@
   $("pause").addEventListener("click", () => setPause(!paused));
   $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
   $("fav").addEventListener("click", toggleFav);
+  // Pfeiltasten im Pause-Modus: ↑ ein Panorama vorwärts (Blickrichtung), ↓ zurück
+  document.addEventListener("keydown", (e) => {
+    if (!paused || !tourPano) return;
+    if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+    if (e.key === "ArrowUp") { walk(true); e.preventDefault(); }
+    else if (e.key === "ArrowDown") { walk(false); e.preventDefault(); }
+  });
   $("openmaps").addEventListener("click", openInMaps);
   $("miniIn").addEventListener("click", () => { miniAutoZoom = false; miniMap && miniMap.setZoom(miniMap.getZoom() + 1); });
   $("miniOut").addEventListener("click", () => { miniAutoZoom = false; miniMap && miniMap.setZoom(miniMap.getZoom() - 1); });
