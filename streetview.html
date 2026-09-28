@@ -788,9 +788,14 @@
       }
       return null;
     };
-    // Läuft der Punkt gerade auf einer Scenic Byway? → Name (für grünen Balken), sonst null
+    // Läuft der Punkt gerade auf einer Scenic Byway? → Name, sonst null.
+    // Hysterese: einmal drauf, bleibt die AKTUELLE Byway mit größerer Toleranz „an"
+    // (überbrückt kleine Versätze/Datenlücken) — erst zum Einsteigen ist es streng.
+    const SCENIC_ENTER = 0.0006, SCENIC_STAY = 0.0012; // ~66 m rein, ~130 m dranbleiben
+    let curScenic = null, scenicMiss = 0;
     const onScenicByway = (pt) => {
-      for (const s of scenicWays) if (google.maps.geometry.poly.isLocationOnEdge(pt, s.poly, 0.0006)) return s.name; // ~66 m
+      if (curScenic) for (const s of scenicWays) if (s.name === curScenic && google.maps.geometry.poly.isLocationOnEdge(pt, s.poly, SCENIC_STAY)) return curScenic;
+      for (const s of scenicWays) if (google.maps.geometry.poly.isLocationOnEdge(pt, s.poly, SCENIC_ENTER)) return s.name;
       return null;
     };
 
@@ -897,7 +902,13 @@
       if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
       const poi = poiMode ? nearbyPoi(pt) : null;
       let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined, kind = poi ? "poi" : null;
-      if (!special && scenicMode) { const sb = onScenicByway(pt); if (sb) { special = true; label = "Scenic Byway: " + sb; kind = "scenic"; } }
+      if (!special && scenicMode) {
+        let sb = onScenicByway(pt);
+        if (sb) scenicMiss = 0;
+        else if (curScenic && scenicMiss < 3) { sb = curScenic; scenicMiss++; } // kurze Lücke überbrücken
+        if (sb) { special = true; label = "Scenic Byway: " + sb; kind = "scenic"; curScenic = sb; }
+        else { curScenic = null; scenicMiss = 0; }
+      }
       await pushPano(pt, special, rad, label, distM, kind);
       return true;
     };
