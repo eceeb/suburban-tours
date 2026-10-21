@@ -198,6 +198,9 @@
       <input type="checkbox" id="border" checked style="width:auto;" /> Stopp an US-Bundesstaatsgrenzen
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
+      <input type="checkbox" id="rivers" checked style="width:auto;" /> Stopp an großen Flüssen
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
       <input type="checkbox" id="poi" checked style="width:auto;" /> Stopp an Sehenswürdigkeiten (Overpass, unzuverlässig)
     </label>
     <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#e8ecf3;">
@@ -775,6 +778,130 @@
     return null;
   }
 
+  // GROSSE FLÜSSE als fester Datensatz (Natural Earth, weltweit, mit Namen) — wie die
+  // Bundesstaatsgrenzen lokal geprüft, also ohne Overpass und damit zuverlässig.
+  // Nur echte Flüsse (keine Seen-Mittellinien), nur benannte.
+  let riverPromise = null;
+  function loadRivers() {
+    if (!riverPromise) riverPromise = (async () => {
+      try {
+        const j = await (await fetch("https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_10m_rivers_lake_centerlines.geojson")).json();
+        const lines = [];
+        for (const f of j.features) {
+          const p = f.properties || {};
+          if (p.featurecla !== "River" || !p.name) continue;
+          const g = f.geometry, parts = g.type === "MultiLineString" ? g.coordinates : [g.coordinates];
+          for (const pts of parts) {
+            let x0 = 180, y0 = 90, x1 = -180, y1 = -90; // Bounding-Box je Linie (schnelles Aussortieren)
+            for (const [x, y] of pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+            lines.push({ name: p.name, pts, box: [x0, y0, x1, y1] });
+          }
+        }
+        return lines;
+      } catch (e) { return []; }
+    })();
+    return riverPromise;
+  }
+  // Schnittpunkt zweier Strecken (lng/lat, für kurze Stücke genau genug) → Anteil t auf a–b, sonst null
+  function segT(ax, ay, bx, by, cx, cy, dx, dy) {
+    const d = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+    if (!d) return null;
+    const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / d;
+    const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
+  }
+  // Alle Stellen, an denen die Route einen Fluss kreuzt → [{distM, name}] nach Streckenmeter.
+  // Route-Segmente kommen in ein 0,1°-Raster, damit nicht jedes Flussstück gegen jedes
+  // Routenstück geprüft werden muss.
+  function riverCrossings(path, cum, lines) {
+    const G = 0.1, grid = new Map(), cells = (x0, y0, x1, y1, fn) => {
+      for (let gx = Math.floor(Math.min(x0, x1) / G); gx <= Math.floor(Math.max(x0, x1) / G); gx++)
+        for (let gy = Math.floor(Math.min(y0, y1) / G); gy <= Math.floor(Math.max(y0, y1) / G); gy++) fn(gx + "," + gy);
+    };
+    let rx0 = 180, ry0 = 90, rx1 = -180, ry1 = -90;
+    const P = path.map((p) => [p.lng(), p.lat()]);
+    for (let i = 1; i < P.length; i++) {
+      const [ax, ay] = P[i - 1], [bx, by] = P[i];
+      rx0 = Math.min(rx0, ax, bx); rx1 = Math.max(rx1, ax, bx); ry0 = Math.min(ry0, ay, by); ry1 = Math.max(ry1, ay, by);
+      cells(ax, ay, bx, by, (k) => { (grid.get(k) || grid.set(k, []).get(k)).push(i); });
+    }
+    const hits = [];
+    for (const r of lines) {
+      const [x0, y0, x1, y1] = r.box;
+      if (x1 < rx0 || x0 > rx1 || y1 < ry0 || y0 > ry1) continue; // Fluss weit weg von der Route
+      for (let j = 1; j < r.pts.length; j++) {
+        const [cx, cy] = r.pts[j - 1], [dx, dy] = r.pts[j], cand = new Set();
+        cells(cx, cy, dx, dy, (k) => { const a = grid.get(k); if (a) for (const i of a) cand.add(i); });
+        for (const i of cand) {
+          const t = segT(P[i - 1][0], P[i - 1][1], P[i][0], P[i][1], cx, cy, dx, dy);
+          if (t !== null) hits.push({ distM: cum[i - 1] + t * (cum[i] - cum[i - 1]), name: r.name });
+        }
+      }
+    }
+    hits.sort((a, b) => a.distM - b.distM);
+    // derselbe Fluss mehrfach kurz hintereinander (Flussarme, Kurven) → nur ein Stopp je 3 km
+    return hits.filter((h, k) => !hits.slice(0, k).some((o) => o.name === h.name && h.distM - o.distM < 3000));
+  }
+
+  // EXAKTE Brücke: Natural Earth ist stark generalisiert und liegt bis ~10 km neben dem echten
+  // Fluss (Green River/I-80: 9 km). Darum die echten Flussläufe aus OSM-Vektor-Kacheln holen
+  // (OpenFreeMap: keyless, über ein CDN ausgeliefert — stabiler als Overpass) und im Fenster
+  // ±12 km um die grobe Stelle den Schnittpunkt mit der Route suchen, nur mit gleichem Namen.
+  const RIVER_WIN = 12000, RIVER_Z = 13;
+  let mvtLib = null, tileTpl = null; const tileCache = new Map();
+  function mvtTile(x, y) {
+    if (!mvtLib) mvtLib = Promise.all([
+      import("https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@2/+esm"),
+      import("https://cdn.jsdelivr.net/npm/pbf@4/+esm"),
+    ]).catch((e) => { mvtLib = null; throw e; });
+    if (!tileTpl) tileTpl = fetch("https://tiles.openfreemap.org/planet").then((r) => r.json()).then((j) => j.tiles[0])
+      .catch((e) => { tileTpl = null; throw e; });
+    const k = x + "/" + y;
+    if (!tileCache.has(k)) tileCache.set(k, (async () => {
+      const [[{ VectorTile }, { default: Pbf }], tpl] = await Promise.all([mvtLib, tileTpl]);
+      const r = await fetch(tpl.replace("{z}", RIVER_Z).replace("{x}", x).replace("{y}", y));
+      if (!r.ok) throw new Error("Kachel HTTP " + r.status);
+      return new VectorTile(new Pbf(await r.arrayBuffer()));
+    })().catch((e) => { tileCache.delete(k); throw e; }));
+    return tileCache.get(k);
+  }
+  async function refineRiver(c, path, cum) {
+    const n = 2 ** RIVER_Z;
+    const tx = (lon) => Math.floor((lon + 180) / 360 * n);
+    const ty = (lat) => { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n); };
+    const from = Math.max(0, c.distM - RIVER_WIN), to = Math.min(cum[cum.length - 1], c.distM + RIVER_WIN);
+    // Kacheln entlang der Route im Fenster (alle 400 m ein Punkt, damit lange gerade Stücke keine Kachel überspringen)
+    const tiles = new Set();
+    for (let m = from, i = 1; m <= to; m += 400) {
+      while (i < cum.length - 1 && cum[i] < m) i++;
+      const t = (m - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1), a = path[i - 1], b = path[i];
+      tiles.add(tx(a.lng() + t * (b.lng() - a.lng())) + "," + ty(a.lat() + t * (b.lat() - a.lat())));
+    }
+    const want = c.name.toLowerCase(), lines = [];
+    for (const k of tiles) {
+      const [x, y] = k.split(",").map(Number), L = (await mvtTile(x, y)).layers.waterway;
+      if (!L) continue;
+      for (let f = 0; f < L.length; f++) {
+        const feat = L.feature(f), name = feat.properties.name || "";
+        if (feat.properties.class !== "river" || !name.toLowerCase().includes(want)) continue; // nur DIESER Fluss
+        const g = feat.toGeoJSON(x, y, RIVER_Z).geometry;
+        for (const pts of (g.type === "MultiLineString" ? g.coordinates : [g.coordinates])) lines.push({ name, pts });
+      }
+    }
+    let best = null;
+    for (let i = 1; i < path.length; i++) {
+      if (cum[i] < from || cum[i - 1] > to) continue;
+      const ax = path[i - 1].lng(), ay = path[i - 1].lat(), bx = path[i].lng(), by = path[i].lat();
+      for (const ln of lines) for (let j = 1; j < ln.pts.length; j++) {
+        const t = segT(ax, ay, bx, by, ln.pts[j - 1][0], ln.pts[j - 1][1], ln.pts[j][0], ln.pts[j][1]);
+        if (t === null) continue;
+        const m = cum[i - 1] + t * (cum[i] - cum[i - 1]);
+        if (!best || Math.abs(m - c.distM) < Math.abs(best.distM - c.distM)) best = { distM: m, name: ln.name };
+      }
+    }
+    return best; // null → lieber kein Stopp als ein falscher
+  }
+
   async function startProducer(rawPath, radius, stepM, naviPoints, myGen) {
     const sph = google.maps.geometry.spherical;
     const seen = new Set();
@@ -820,6 +947,12 @@
     const cum = [0];
     for (let i = 1; i < rawPath.length; i++) cum[i] = cum[i - 1] + sph.computeDistanceBetween(rawPath[i - 1], rawPath[i]);
     let poiFetchedM = 0, poiFetching = false, walkedM = 0;
+    // Fluss-Kreuzungen der ganzen Route vorab grob bestimmen (lokal, schnell) und die exakte
+    // Brücke je Kreuzung gleich im Hintergrund suchen
+    const rivers = $("rivers").checked ? riverCrossings(rawPath, cum, await loadRivers()) : [];
+    for (const c of rivers) c.exact = refineRiver(c, rawPath, cum).catch(() => null);
+    let riverIdx = 0;
+    const riverStops = [], riverTaken = []; // exakte Stopps (noch offen / alle angenommenen)
     // Punkt bei Streckenmeter m — ENTLANG der Route (nicht Luftlinie)
     const pointAtDistance = (m) => {
       if (m <= 0) return rawPath[0];
@@ -881,13 +1014,20 @@
       }
     };
 
-    // Grenz-Stopp an der KORREKTEN Position einfügen (nach Streckendistanz), nicht
-    // hinten anhängen — sonst erscheint er erst nach schon gezeigten Stopps dahinter.
-    async function insertBorder(crossM, label) {
-      const loc = await nearestPano(pointAtDistance(crossM), 150);
-      if (!loc || seen.has(loc.pano)) return;
+    // Besonderen Stopp (Grenze, Fluss) an der KORREKTEN Position einfügen (nach
+    // Streckendistanz), nicht hinten anhängen — sonst erscheint er nach schon gezeigten Stopps.
+    // Ist das Panorama dort schon als normaler Stopp drin (z.B. Abtastpunkt auf der Brücke),
+    // wird DIESER markiert statt den Stopp zu verlieren.
+    async function insertSpecial(crossM, label, kind, rad = 150) {
+      const loc = await nearestPano(pointAtDistance(crossM), rad);
+      if (!loc) return;
+      if (seen.has(loc.pano)) {
+        const e = panoList.find((x) => x.pano === loc.pano);
+        if (e) { e.border = true; e.label = label; e.kind = kind; }
+        return;
+      }
       seen.add(loc.pano);
-      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind: "border" };
+      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind };
       let idx = panoList.length;
       for (let k = Math.max(consumerIdx + 1, 0); k < panoList.length; k++) {
         if (panoList[k].distM != null && panoList[k].distM > crossM) { idx = k; break; }
@@ -905,7 +1045,7 @@
         if (curState && st !== curState) {
           let lo = lastChkM, hi = walkedM; // Grenze zwischen diesen Streckenmetern
           for (let i = 0; i < 10; i++) { const mid = (lo + hi) / 2; stateOf(pointAtDistance(mid)) === curState ? (lo = mid) : (hi = mid); }
-          await insertBorder(hi, "Grenze → " + st.split("|")[1]); // exakt + richtige Position
+          await insertSpecial(hi, "Grenze → " + st.split("|")[1], "border"); // exakt + richtige Position
         }
         curState = st;
       }
@@ -917,6 +1057,20 @@
       while (myGen === gen && panoList.length > consumerIdx + BUFFER) await sleep(60);
       if (myGen !== gen) return false;
       if (borderMode) { await borderCheck(); if (myGen !== gen) return false; }
+      // Exakte Brücke rechtzeitig kennen (bevor wir das Suchfenster erreichen) …
+      while (riverIdx < rivers.length && distM >= rivers[riverIdx].distM - RIVER_WIN - 1000) {
+        const x = await rivers[riverIdx++].exact;
+        if (myGen !== gen) return false;
+        if (x && !riverTaken.some((s) => s.name === x.name && Math.abs(s.distM - x.distM) < 1000)) {
+          riverTaken.push(x); riverStops.push(x); riverStops.sort((a, b) => a.distM - b.distM);
+        }
+      }
+      // … und dort als Stopp genau auf der Brücke einsetzen
+      while (riverStops.length && riverStops[0].distM <= distM) {
+        const s = riverStops.shift();
+        await insertSpecial(s.distM, "🌊 " + s.name, "river", 60);
+        if (myGen !== gen) return false;
+      }
       const poi = poiMode ? nearbyPoi(pt) : null;
       let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined, kind = poi ? "poi" : null;
       if (!special && scenicMode) {
@@ -1522,7 +1676,9 @@
         if (needResync) { smoothHdg = tourPano.getPov().heading; needResync = false; }
 
         segElapsed += dt;
-        const f = Math.min(1, segElapsed / stepMsLive());
+        // an einem Fluss 3× so lange halten, damit man ihn in Ruhe sieht
+        const hold = panoList[curIdx] && panoList[curIdx].kind === "river" ? 3 : 1;
+        const f = Math.min(1, segElapsed / (stepMsLive() * hold));
         const fx = $("fx").checked;
         smoothHdg = lerpAngle(smoothHdg, headingAt(curIdx), 0.08);
         tourPano.setPov({ heading: smoothHdg, pitch: 0, zoom: fx ? zoomFor(distAt(curIdx)) * f : 0 });
@@ -1585,6 +1741,7 @@
       await loadGoogleMaps(key);
       ensurePano();
       loadStateBoundaries(); // Bundesstaat-Polygone laden (für die Info-Zeile), nicht-blockierend
+      if ($("rivers").checked) loadRivers(); // Fluss-Daten parallel zur Routensuche vorladen
       setStatus("Suche Adressen & Route…");
       const origin = await resolveLocation($("start"));
       await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde

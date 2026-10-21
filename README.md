@@ -21,6 +21,13 @@ stores favourites and photos — no build step, no dependencies.
 - **Scenic byways:** detects when the route runs on a named scenic byway (from
   OpenStreetMap route relations) and turns the control bar teal (distinct from
   the green border bar) for the whole stretch, with the byway's name.
+- **Big rivers:** stops right on the bridge when the route crosses a major river,
+  turns the bar green with the river's name (e.g. "🌊 North Platte River") and
+  holds 3× as long. Which rivers count as "big" comes from the Natural Earth
+  dataset (offline, reliable); since that is heavily generalised (up to ~10 km
+  off), the exact bridge is found in OpenStreetMap vector tiles (OpenFreeMap,
+  keyless CDN) by matching the river name within ±12 km. No exact match → no stop,
+  rather than a wrong one.
 - Control bar always shows **current US state · distance travelled · elevation**
   (elevation via the keyless open-meteo API).
 - **Route via scenic byways (optional):** if a scenic byway runs close to the
