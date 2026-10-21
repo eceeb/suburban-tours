@@ -62,6 +62,20 @@
   #radioBtn.on { background:#2ec46b; color:#08130c; }
   #radioLabel { color:#8fd6a8; font-size:11px; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #radioLabel:empty { display:none; }
+  /* Sender-Menü: Popup über dem 📻-Button */
+  #radioWrap { position:relative; display:flex; }
+  #radioMenu { position:absolute; bottom:calc(100% + 12px); left:-10px; width:290px; max-height:55vh; overflow-y:auto;
+    display:none; background:#12151c; border:1px solid #2a2f3a; border-radius:12px; padding:6px;
+    box-shadow:0 10px 30px rgba(0,0,0,.6); z-index:30; }
+  #radioMenu.show { display:block; }
+  #radioMenu .rm-head { font-size:11px; color:#9aa4b2; padding:4px 8px 6px; }
+  #radioMenu button { display:block; width:100%; text-align:left; border:0; background:transparent; color:#e8ecf3;
+    font-size:12px; padding:6px 8px; border-radius:7px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #radioMenu button:hover { background:#222733; }
+  #radioMenu button.cur { background:rgba(46,196,107,.18); color:#8fd6a8; font-weight:600; }
+  #radioMenu button.dead { color:#6b7280; text-decoration:line-through; }
+  #radioMenu .rm-foot { display:flex; gap:6px; border-top:1px solid #22262f; margin-top:6px; padding-top:6px; }
+  #radioMenu .rm-foot button { text-align:center; background:#2a2f3a; }
 
   #minimap {
     position: fixed; left: 12px; bottom: 16px; z-index: 15;
@@ -248,7 +262,10 @@
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
-  <button id="radioBtn" title="Radio: Klick = nächster Sender · Rechtsklick = aus">📻</button>
+  <span id="radioWrap">
+    <button id="radioBtn" title="Radio: Klick = Sender-Menü · Rechtsklick = aus">📻</button>
+    <div id="radioMenu"></div>
+  </span>
   <span id="pauseTools">
     <button id="back" title="Vorheriger Stopp">◀</button>
     <button id="fav" title="Als Favorit merken">★</button>
@@ -1043,9 +1060,50 @@
 
   // --- Lokales Radio (keyless via Radio-Browser-DB) ---
   // Spielt einen lokalen Sender des aktuellen Bundesstaats (bzw. Landes) und wechselt
-  // automatisch beim Staatswechsel. Klick = nächster Sender (an, falls aus), Rechtsklick = aus.
+  // automatisch beim Staatswechsel. Klick auf 📻 = Sender-Menü (schaltet ggf. ein), Rechtsklick = aus.
   let radioOn = false, radioKey = null, radioBusy = false, radioStations = [], radioIdx = -1, radioRegion = "";
-  function showRadio(txt) { $("radioLabel").textContent = txt ? "📻 " + txt : ""; }
+  let radioDead = new Set(); // Sender, die gerade nicht erreichbar waren (im Menü durchgestrichen)
+  function showRadio(txt) { $("radioLabel").textContent = txt ? "📻 " + txt : ""; renderRadioMenu(); }
+  // Einen Sender probieren → true, sobald er wirklich spielt/lädt (max. 4 s)
+  function tryStation(s) {
+    const a = $("radio");
+    return new Promise((resolve) => {
+      let done = false; const fin = (v) => { if (!done) { done = true; a.onplaying = a.oncanplay = a.onerror = null; clearTimeout(t); resolve(v); } };
+      const t = setTimeout(() => fin(false), 4000);
+      a.onplaying = () => fin(true); a.oncanplay = () => fin(true); a.onerror = () => fin(false);
+      a.src = s.url; a.play().catch(() => {});
+    });
+  }
+  const radioLabelFor = (i) => radioStations[i].name + " · " + radioRegion + "  (" + (i + 1) + "/" + radioStations.length + ")";
+  // Sender-Menü neu zeichnen (nur wenn offen): Liste der Sender, aktueller markiert
+  function renderRadioMenu() {
+    const m = $("radioMenu"); if (!m.classList.contains("show")) return;
+    m.innerHTML = "";
+    const head = document.createElement("div"); head.className = "rm-head";
+    head.textContent = radioStations.length ? "📻 " + radioRegion + " · " + radioStations.length + " Sender" : (radioBusy ? "suche Sender…" : "keine Sender gefunden");
+    m.appendChild(head);
+    radioStations.forEach((s, i) => {
+      const b = document.createElement("button");
+      b.textContent = (i === radioIdx ? "▶ " : "") + s.name; b.title = s.name;
+      if (i === radioIdx) b.classList.add("cur");
+      if (radioDead.has(i)) b.classList.add("dead");
+      b.onclick = () => radioPlayAt(i);
+      m.appendChild(b);
+    });
+    const foot = document.createElement("div"); foot.className = "rm-foot";
+    const next = document.createElement("button"); next.textContent = "⏭ Nächster"; next.onclick = radioNext;
+    const off = document.createElement("button"); off.textContent = "⏹ Aus"; off.onclick = radioOff;
+    foot.append(next, off); m.appendChild(foot);
+  }
+  function toggleRadioMenu(show) { $("radioMenu").classList.toggle("show", show); renderRadioMenu(); }
+  // Gezielt einen Sender aus dem Menü spielen
+  async function radioPlayAt(i) {
+    if (radioBusy || !radioStations[i]) return;
+    radioBusy = true; showRadio("verbinde: " + radioStations[i].name + "…");
+    if (await tryStation(radioStations[i])) { radioIdx = i; radioDead.delete(i); showRadio(radioLabelFor(i)); }
+    else { radioDead.add(i); showRadio(radioStations[i].name + " nicht erreichbar"); }
+    radioBusy = false; renderRadioMenu();
+  }
   async function pickStations(reg) {
     const base = "https://de1.api.radio-browser.info/json/stations/search?order=votes&reverse=true&limit=25&hidebroken=true";
     const url = reg.cc === "US"
@@ -1058,18 +1116,13 @@
   }
   // Ab Index startIdx (mit Umlauf) den nächsten Sender suchen, der wirklich spielt/lädt
   async function radioPlayFrom(startIdx) {
-    const a = $("radio"), n = radioStations.length;
+    const n = radioStations.length;
     if (!n) { showRadio("kein Sender für " + radioRegion); return false; }
     for (let k = 0; k < n; k++) {
       if (!radioOn) return false;
-      const i = ((startIdx + k) % n + n) % n, s = radioStations[i];
-      const ok = await new Promise((resolve) => {
-        let done = false; const fin = (v) => { if (!done) { done = true; a.onplaying = a.oncanplay = a.onerror = null; clearTimeout(t); resolve(v); } };
-        const t = setTimeout(() => fin(false), 4000);
-        a.onplaying = () => fin(true); a.oncanplay = () => fin(true); a.onerror = () => fin(false);
-        a.src = s.url; a.play().catch(() => {});
-      });
-      if (ok) { radioIdx = i; showRadio(s.name + " · " + radioRegion + "  (" + (i + 1) + "/" + n + ")"); return true; }
+      const i = ((startIdx + k) % n + n) % n;
+      if (await tryStation(radioStations[i])) { radioIdx = i; radioDead.delete(i); showRadio(radioLabelFor(i)); return true; }
+      radioDead.add(i); renderRadioMenu();
     }
     showRadio("kein spielbarer Sender (" + radioRegion + ")"); return false;
   }
@@ -1083,21 +1136,25 @@
     if (key === radioKey) return; // gleicher Staat → weiterlaufen lassen
     radioKey = key; radioRegion = reg.state || reg.country || ""; radioBusy = true;
     showRadio("suche Sender…");
-    radioStations = await pickStations(reg); radioIdx = -1;
+    radioStations = []; radioIdx = -1; radioDead = new Set(); renderRadioMenu();
+    radioStations = await pickStations(reg);
     await radioPlayFrom(0);
-    radioBusy = false;
+    radioBusy = false; renderRadioMenu();
   }
-  // Klick auf 📻: einschalten, sonst zum nächsten Sender wechseln
-  async function radioClick() {
-    if (!radioOn) { radioOn = true; $("radioBtn").classList.add("on"); radioKey = null; await updateRadioForCurrent(); return; }
+  async function radioNext() {
     if (radioBusy || !radioStations.length) return;
     radioBusy = true; showRadio("nächster Sender…");
     await radioPlayFrom(radioIdx + 1);
-    radioBusy = false;
+    radioBusy = false; renderRadioMenu();
+  }
+  // Klick auf 📻: Menü auf/zu — ist das Radio aus, wird es eingeschaltet und das Menü geöffnet
+  async function radioClick() {
+    if (!radioOn) { radioOn = true; $("radioBtn").classList.add("on"); radioKey = null; toggleRadioMenu(true); await updateRadioForCurrent(); return; }
+    toggleRadioMenu(!$("radioMenu").classList.contains("show"));
   }
   function radioOff() {
     radioOn = false; $("radioBtn").classList.remove("on");
-    $("radio").pause(); $("radio").removeAttribute("src"); showRadio("");
+    $("radio").pause(); $("radio").removeAttribute("src"); toggleRadioMenu(false); showRadio("");
   }
 
   // Einen einzelnen Ort im Viewer öffnen (z.B. aus den Favoriten) — Pause-Modus,
@@ -1489,6 +1546,9 @@
   $("pause").addEventListener("click", () => setPause(!paused));
   $("radioBtn").addEventListener("click", radioClick);
   $("radioBtn").addEventListener("contextmenu", (e) => { e.preventDefault(); radioOff(); });
+  // Klick außerhalb schließt das Menü. composedPath statt contains: das Menü baut sich beim
+  // Klick neu auf, das geklickte Element hängt danach nicht mehr im DOM.
+  document.addEventListener("click", (e) => { if (!e.composedPath().includes($("radioWrap"))) toggleRadioMenu(false); });
   $("back").addEventListener("click", () => { if (paused && tourPano) goToStop(curIdx - 1); });
   $("fav").addEventListener("click", toggleFav);
   // Pfeiltasten im Pause-Modus: ↑ ein Panorama vorwärts (Blickrichtung), ↓ zurück

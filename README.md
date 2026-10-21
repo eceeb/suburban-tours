@@ -44,8 +44,10 @@ stores favourites and photos — no build step, no dependencies.
   around and take photos there without driving a whole tour.
 - **Local radio (📻):** streams a local station for the state/region you are
   currently in (keyless, via the Radio-Browser community DB) and switches
-  automatically when you cross into a new state. **Click** to turn on / hop to
-  the next station (shown as `n/total`); **right-click** to turn off.
+  automatically when you cross into a new state. **Click** opens a popup with
+  all stations for the current state (turns the radio on if it was off) — pick
+  one, or use ⏭ next / ⏹ off; unreachable stations get struck through.
+  **Right-click** turns it off.
 - Mini map (bottom-left) tracking the current position.
 - Local usage estimate (top-right) as a rough free-quota gauge, with a warning
   banner (and optional auto-stop) when the estimate crosses the free tier. This
