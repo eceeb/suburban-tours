@@ -1121,11 +1121,24 @@
     setStatus("Ort geöffnet — umsehen & 📷 fotografieren.");
   }
 
-  // --- Favoriten (lokale Ablage im Browser) ---
+  // --- Favoriten: zentral im lokalen Server (data/favorites.json), browser-unabhängig ---
+  // Im Speicher gecacht (synchroner Zugriff); jede Änderung wird an den Server geschickt.
+  // Läuft nur der statische Server (ohne API), Fallback auf localStorage.
   const FAV_KEY = "svFavorites";
-  const getFavs = () => { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } };
-  const isFav = (panoId) => getFavs().some((f) => f.pano === panoId);
-  const saveFavs = (favs) => { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); refreshFav(); updateFavCount(); };
+  let favCache = [], favApi = true;
+  const getFavs = () => favCache;
+  const isFav = (panoId) => favCache.some((f) => f.pano === panoId);
+  const saveFavs = (favs) => {
+    favCache = favs; refreshFav(); updateFavCount();
+    if (favApi) fetch("/api/favorites", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(favs) })
+      .catch(() => setStatus("Favorit nicht gespeichert — Server nicht erreichbar", true));
+    else localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+  };
+  async function loadFavs() {
+    try { const r = await fetch("/api/favorites"); if (!r.ok) throw 0; favCache = await r.json(); }
+    catch (e) { favApi = false; try { favCache = JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e2) { favCache = []; } }
+    updateFavCount();
+  }
   // aktuelles Panorama live (nach freiem Gehen korrekt), sonst der Tour-Stopp
   function curPano() {
     if (tourPano && tourPano.getPano && tourPano.getPano()) {
@@ -1180,24 +1193,20 @@
   $("favBtn").addEventListener("click", () => { renderFavList(); $("favPanel").classList.add("show"); });
   $("favClose").addEventListener("click", () => $("favPanel").classList.remove("show"));
   $("favPanel").addEventListener("click", (e) => { if (e.target === $("favPanel")) $("favPanel").classList.remove("show"); });
-  updateFavCount();
+  loadFavs();
 
-  // FOTOS — bevorzugt der LIVE-Viewer-Canvas in voller Fensterauflösung (kein 640-Limit,
-  // keine extra API-Anfrage, exakt die aktuelle Ansicht). Nur wenn der Canvas nicht lesbar
-  // ist, Fallback auf die Static API (640×640, 1 Anfrage). Lokal in IndexedDB (bleibt
-  // erhalten), plus Download-Button (eine Browser-Seite darf nicht selbst in den Ordner schreiben).
-  const PHOTO_DB = "svPhotoDB", PHOTO_STORE = "photos";
-  function photoDB() {
-    return new Promise((res, rej) => {
-      const req = indexedDB.open(PHOTO_DB, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(PHOTO_STORE, { keyPath: "id", autoIncrement: true });
-      req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
-    });
+  // FOTOS — aufgenommen in voller Fensterauflösung (Offscreen-Viewer), Fallback Static API.
+  // Gespeichert ZENTRAL im lokalen Server: Bild als data/photos/<id>.jpg, Metadaten in
+  // data/photos/index.json → browser-unabhängig und echt im Projektordner.
+  const photoUrl = (p) => `/api/photos/${p.id}.jpg`;
+  const blobToDataUrl = (blob) => new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+  async function photoAdd(rec) {
+    const { blob, ...meta } = rec;
+    const r = await fetch("/api/photos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...meta, data: await blobToDataUrl(blob) }) });
+    if (!r.ok) throw new Error("Server: Foto nicht gespeichert (HTTP " + r.status + ")");
   }
-  async function photoAdd(rec) { const db = await photoDB(); return new Promise((res, rej) => { const tx = db.transaction(PHOTO_STORE, "readwrite"); tx.objectStore(PHOTO_STORE).add(rec); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
-  async function photoAll() { const db = await photoDB(); return new Promise((res, rej) => { const r = db.transaction(PHOTO_STORE, "readonly").objectStore(PHOTO_STORE).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
-  async function photoDel(id) { const db = await photoDB(); return new Promise((res, rej) => { const tx = db.transaction(PHOTO_STORE, "readwrite"); tx.objectStore(PHOTO_STORE).delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+  async function photoAll() { const r = await fetch("/api/photos"); if (!r.ok) throw new Error("Server nicht erreichbar"); return r.json(); }
+  async function photoDel(id) { await fetch("/api/photos/" + id, { method: "DELETE" }); }
   async function updateGalCount() { try { $("galBtn").textContent = `🖼 Galerie (${(await photoAll()).length})`; } catch (e) {} }
 
   // Land + Region zu einem Punkt (für die Galerie-Ordner): USA lokal über die
@@ -1274,14 +1283,14 @@
 
   function makeGalCard(p) {
     const card = document.createElement("div"); card.className = "gal-card";
-    const img = document.createElement("img"); img.src = URL.createObjectURL(p.blob); img.loading = "lazy";
+    const img = document.createElement("img"); img.src = photoUrl(p); img.loading = "lazy";
     img.style.cursor = "zoom-in"; img.title = "In voller Größe öffnen";
-    img.onclick = () => window.open(URL.createObjectURL(p.blob), "_blank"); // volle Auflösung anzeigen
+    img.onclick = () => window.open(photoUrl(p), "_blank"); // volle Auflösung anzeigen
     const cap = document.createElement("div"); cap.className = "gal-cap";
     cap.textContent = (p.imageDate ? "📅 " + p.imageDate + " · " : "") + p.place;
     const row = document.createElement("div"); row.className = "gal-actions";
     const dl = document.createElement("button"); dl.textContent = "⬇︎"; dl.title = "Herunterladen";
-    dl.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(p.blob); a.download = `suburban-${(p.country || "")}-${(p.region || "")}-${p.imageDate || "foto"}.jpg`.replace(/\s+/g, "_"); a.click(); };
+    dl.onclick = () => { const a = document.createElement("a"); a.href = photoUrl(p); a.download = `suburban-${(p.country || "")}-${(p.region || "")}-${p.imageDate || "foto"}.jpg`.replace(/\s+/g, "_"); a.click(); };
     const open = document.createElement("button"); open.textContent = "🔗"; open.title = "In Google Maps";
     open.onclick = () => window.open(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${p.lat},${p.lng}`, "_blank");
     const del = document.createElement("button"); del.textContent = "×"; del.title = "Löschen";

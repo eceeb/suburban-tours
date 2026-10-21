@@ -4,7 +4,7 @@
     {
       "name": "suburban-tours",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8777"],
+      "runtimeArgs": ["server.py"],
       "port": 8777
     }
   ]

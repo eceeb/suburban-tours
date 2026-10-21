@@ -2,7 +2,8 @@
 
 Play a route as a "film": enter a start and destination, and the app drives a
 Google Street View camera along the route, hopping from panorama to panorama.
-Single self-contained file, no build step — just static HTML.
+One HTML file plus a tiny stdlib-only Python server (`server.py`) that also
+stores favourites and photos — no build step, no dependencies.
 
 ## Features
 
@@ -31,11 +32,13 @@ Single self-contained file, no build step — just static HTML.
 - **Photos:** in pause mode, 📷 grabs the current view as a real JPEG at full
   window resolution (rendered off-screen from the live Street View viewer, not a
   screenshot and not the 640 px Static API), tagged with Google's capture date
-  and the location. Photos are stored locally in the browser's IndexedDB and
-  shown in a **gallery** grouped into country → region folders, each with a
-  download button and click-to-open-full-size. Falls back to the 640×640 Static
-  API if the off-screen capture fails. (A static web page can't write into the
-  project folder itself, so "local" means IndexedDB + manual download.)
+  and the location. Photos are shown in a **gallery** grouped into country →
+  region folders, each with a download button and click-to-open-full-size.
+  Falls back to the 640×640 Static API if the off-screen capture fails.
+- **Central storage:** favourites and photos live on disk under `data/`
+  (`favorites.json`, `photos/<id>.jpg` + `photos/index.json`), served by
+  `server.py` — so every browser on the machine sees the same data. `data/` is
+  git-ignored.
 - **Open a favourite in the viewer:** the 👁 button on a saved favourite opens
   that exact spot in the Street View viewer (paused, free-look) so you can look
   around and take photos there without driving a whole tour.
@@ -58,13 +61,13 @@ races several mirrors, prefers a non-empty answer, and caches results.
 
 ## Running
 
-Any static file server works:
-
 ```bash
-python3 -m http.server 8777
+python3 server.py
 ```
 
-Then open <http://localhost:8777/streetview.html>.
+Then open <http://localhost:8777/streetview.html>. (A plain static server like
+`python3 -m http.server` still runs the app, but favourites fall back to the
+browser's localStorage and photos can't be saved.)
 
 ## Google API key
 
