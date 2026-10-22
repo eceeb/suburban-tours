@@ -46,6 +46,14 @@ stores favourites and photos — no build step, no dependencies.
   (`favorites.json`, `photos/<id>.jpg` + `photos/index.json`), served by
   `server.py` — so every browser on the machine sees the same data. `data/` is
   git-ignored.
+- **Pre-made tours (🗺 Touren):** a picker with curated tours (stops, length,
+  estimated Street View requests for the current mode — orange if it exceeds
+  what's left this month). A tour plays its fixed route exactly: avoid-highway
+  and scenic routing are greyed out. Named stops get a green bar ("📍 Gleeson")
+  and a 2× hold; a stop without Street View coverage is announced on the next
+  available image. Tours are imported once with `tools/import_tours.py` into
+  `data/tours/` (local only, not in git) — e.g. from your own Roadtrippers GPX
+  exports; place lists without a route are geocoded and routed via OSRM.
 - **Open a favourite in the viewer:** the 👁 button on a saved favourite opens
   that exact spot in the Street View viewer (paused, free-look) so you can look
   around and take photos there without driving a whole tour.
