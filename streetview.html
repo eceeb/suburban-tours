@@ -1027,11 +1027,14 @@
     // Punkt bei Streckenmeter m — ENTLANG der Route (nicht Luftlinie)
     const pointAtDistance = (m) => {
       if (m <= 0) return rawPath[0];
-      for (let i = 1; i < rawPath.length; i++) {
-        if (cum[i] >= m) return sph.interpolate(rawPath[i - 1], rawPath[i], (m - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1));
-      }
-      return rawPath[rawPath.length - 1];
+      if (m >= cum[cum.length - 1]) return rawPath[rawPath.length - 1];
+      let lo = 1, hi = cum.length - 1; // Binärsuche: erstes i mit cum[i] >= m
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (cum[mid] >= m) hi = mid; else lo = mid + 1; }
+      return sph.interpolate(rawPath[lo - 1], rawPath[lo], (m - cum[lo - 1]) / ((cum[lo] - cum[lo - 1]) || 1));
     };
+    // Echte Fahrtrichtung an Streckenmeter m (Straße ±25 m) — NICHT die Luftlinie zum nächsten
+    // Stopp: die liegt im Navi-Modus bis 10 km weg und zeigt auf kurvigen Straßen quer zur Fahrbahn.
+    const roadHeading = (m) => sph.computeHeading(pointAtDistance(Math.max(0, m - 25)), pointAtDistance(m + 25));
     const corridorPoints = (fromM, toM) => {
       const out = []; let lastM = -1e9;
       for (let i = 0; i < rawPath.length; i++) {
@@ -1081,7 +1084,8 @@
       const loc = await nearestPano(pt, rad || radius);
       if (loc && !seen.has(loc.pano) && (special || onRoute(loc.latLng))) {
         seen.add(loc.pano);
-        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null, distM, kind: kind || null });
+        panoList.push({ pano: loc.pano, latLng: loc.latLng, border: !!special, label: label || null, distM, kind: kind || null,
+          hdg: distM != null ? roadHeading(distM) : null });
       }
     };
 
@@ -1102,7 +1106,7 @@
         return true;
       }
       seen.add(loc.pano);
-      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind };
+      const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind, hdg: roadHeading(crossM) };
       let idx = panoList.length;
       for (let k = Math.max(consumerIdx + 1, 0); k < panoList.length; k++) {
         if (panoList[k].distM != null && panoList[k].distM > crossM) { idx = k; break; }
@@ -1286,7 +1290,7 @@
   // --- Autofenster-Ansicht: oben Frontscheibe, unten Seitenscheiben links/rechts ---
   // Alle drei zeigen DASSELBE Panorama (keine zusätzliche Suche); die Seiten schauen immer
   // 90° links bzw. rechts von der Front — beim Fahren also seitlich zur Fahrtrichtung.
-  let carView = false, panoL = null, panoR = null;
+  let carView = false, panoL = null, panoR = null, sideFor = null; // sideFor = Panorama, das die Seiten zeigen sollen
   const SIDE_OPTS = {
     visible: true, motionTracking: false, motionTrackingControl: false, addressControl: false,
     showRoadLabels: false, fullscreenControl: false, disableDefaultUI: true, clickToGo: false, scrollwheel: false,
@@ -1295,7 +1299,7 @@
   function syncSides() {
     if (!carView || !panoA || !panoL) return;
     const id = panoA.getPano(); if (!id) return;
-    if (panoL.getPano() !== id) { panoL.setPano(id); panoR.setPano(id); bumpUsage(2); } // 2 weitere Ladevorgänge (vorsichtig mitgezählt)
+    if (sideFor !== id) { sideFor = id; panoL.setPano(id); panoR.setPano(id); bumpUsage(2); } // 2 weitere Ladevorgänge (vorsichtig mitgezählt)
     const h = panoA.getPov().heading;
     panoL.setPov({ heading: norm(h - 90), pitch: 0, zoom: 0 });
     panoR.setPov({ heading: norm(h + 90), pitch: 0, zoom: 0 });
@@ -1309,6 +1313,9 @@
     if (on && !panoL) {
       panoL = new google.maps.StreetViewPanorama($("panoL"), SIDE_OPTS);
       panoR = new google.maps.StreetViewPanorama($("panoR"), SIDE_OPTS);
+      // Nach dem Laden eines Bildes kann Google den Blick zurücksetzen → dann wieder ±90° setzen
+      panoL.addListener("pano_changed", syncSides);
+      panoR.addListener("pano_changed", syncSides);
     }
     google.maps.event.trigger(panoA, "resize"); // Front ist jetzt kleiner/größer
     if (on) { google.maps.event.trigger(panoL, "resize"); google.maps.event.trigger(panoR, "resize"); syncSides(); }
@@ -1676,11 +1683,26 @@
   }
 
   const sph = () => google.maps.geometry.spherical;
-  // Fahrtrichtung an Panorama i = Peilung zum nächsten (bzw. vom vorherigen am Ende)
+  // Fahrtrichtung an Panorama i: bevorzugt die Straßenrichtung aus der Route (hdg), sonst
+  // Peilung zum nächsten (bzw. vom vorherigen am Ende)
   function headingAt(i) {
-    if (panoList[i + 1]) return sph().computeHeading(panoList[i].latLng, panoList[i + 1].latLng);
-    if (panoList[i - 1]) return sph().computeHeading(panoList[i - 1].latLng, panoList[i].latLng);
-    return 0;
+    const it = panoList[i];
+    let h = 0;
+    if (it && it.hdg != null) h = it.hdg;
+    else if (panoList[i + 1]) h = sph().computeHeading(it.latLng, panoList[i + 1].latLng);
+    else if (panoList[i - 1]) h = sph().computeHeading(panoList[i - 1].latLng, it.latLng);
+    // Auf die echte Fahrbahn einrasten: Google kennt am angezeigten Panorama die Straßenrichtungen
+    // (Verknüpfungen zu den Nachbarbildern). Liegt eine < 60° neben der gewünschten Richtung,
+    // genau die nehmen → wirklich geradeaus. Keine Anfrage nötig, der Viewer hat die Daten schon.
+    if (it && tourPano && tourPano.getPano && tourPano.getPano() === it.pano) {
+      let best = null, bd = 60;
+      for (const l of tourPano.getLinks() || []) {
+        const d = Math.abs(((l.heading - h + 540) % 360) - 180);
+        if (d < bd) { bd = d; best = l.heading; }
+      }
+      if (best !== null) h = best;
+    }
+    return h;
   }
   const distAt = (i) => panoList[i + 1]
     ? sph().computeDistanceBetween(panoList[i].latLng, panoList[i + 1].latLng) : 12;
