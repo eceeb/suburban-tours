@@ -137,7 +137,7 @@
     background: rgba(18,21,28,.9); color: #e8ecf3; font-size: 15px; line-height: 1; cursor: pointer; }
 
   /* Favoriten-Ansicht */
-  #favBtn { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid #2a2f3a;
+  #favBtn, #tourBtn { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid #2a2f3a;
     border-radius: 8px; background: #11141b; color: #e8ecf3; font-size: 13px; cursor: pointer; }
   #favPanel { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(8,10,14,.6); }
   #favPanel.show { display: flex; align-items: center; justify-content: center; }
@@ -150,6 +150,24 @@
   .fav-row button { border: 0; border-radius: 6px; background: #2a2f3a; color: #e8ecf3; cursor: pointer; font-size: 12px; padding: 5px 7px; white-space: nowrap; }
   .fav-empty { color: #9aa4b2; font-size: 12px; }
 
+  /* Vorgefertigte Touren: Auswahl-Ansicht (wie Galerie) */
+  #tourPanel { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(8,10,14,.6); }
+  #tourPanel.show { display: flex; align-items: center; justify-content: center; }
+  #tourPanel .box { width: 560px; max-width: calc(100vw - 24px); max-height: 80vh; overflow-y: auto;
+    background: #12151c; border: 1px solid #2a2f3a; border-radius: 12px; padding: 16px; }
+  #tourPanel h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; color:#e8ecf3; }
+  #tourClose { border: 0; background: #2a2f3a; color: #e8ecf3; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
+  .tour-card { display: flex; gap: 12px; align-items: center; padding: 10px; border: 1px solid #22262f; border-radius: 10px; margin-bottom: 8px; background: #0e1116; }
+  .tour-card .t-main { flex: 1; min-width: 0; }
+  .tour-card .t-title { font-size: 14px; font-weight: 600; color: #e8ecf3; }
+  .tour-card .t-desc { font-size: 12px; color: #9aa4b2; margin: 2px 0 4px; }
+  .tour-card .t-meta { font-size: 11px; color: #c3cad6; font-variant-numeric: tabular-nums; }
+  .tour-card .t-meta a { color: #7fa4ff; }
+  .tour-card .t-warn { color: #ffb020; }
+  .tour-card button { border: 0; border-radius: 8px; background: #4c7dff; color: #fff; padding: 8px 12px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+  #presetNote { display: none; margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: rgba(76,125,255,.15); color: #b9cbff; font-size: 11px; }
+  #presetNote.show { display: block; }
+  label:has(> input:disabled) { opacity: .45; }
   #galPanel { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(8,10,14,.6); }
   #galPanel.show { display: flex; align-items: center; justify-content: center; }
   #galPanel .box { width: 620px; max-width: calc(100vw - 24px); max-height: 80vh; overflow-y: auto;
@@ -220,6 +238,7 @@
       <input type="checkbox" id="scenicRoute" style="width:auto;" /> Auf schöne Strecken routen (falls in der Nähe)
     </label>
     <div style="font-size:10px;color:#6b7280;margin-top:4px;">Baut nahe Scenic Byways als Umweg ein (max +40 %). Fragt vorab OSM ab → Start langsamer.</div>
+    <div id="presetNote">🗺 Vorgefertigte Tour aktiv — Meiden- und Scenic-Routing gelten hier nicht (die Strecke ist fest).</div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;color:#e8ecf3;">
       <input type="checkbox" id="stopAtLimit" checked style="width:auto;" /> Bei geschätztem Gratis-Limit anhalten
     </label>
@@ -229,6 +248,7 @@
   <button id="go">Tour starten</button>
   <button id="favBtn">★ Favoriten</button>
   <button id="galBtn">🖼 Galerie</button>
+  <button id="tourBtn">🗺 Touren</button>
   <div id="status"></div>
 
   <div class="hint">
@@ -245,6 +265,13 @@
   <div class="box">
     <h2>★ Favoriten <button id="favClose" title="Schließen">×</button></h2>
     <div id="favList"></div>
+  </div>
+</div>
+
+<div id="tourPanel">
+  <div class="box">
+    <h2>🗺 Vorgefertigte Touren <button id="tourClose" title="Schließen">×</button></h2>
+    <div id="tourList"></div>
   </div>
 </div>
 
@@ -902,7 +929,7 @@
     return best; // null → lieber kein Stopp als ein falscher
   }
 
-  async function startProducer(rawPath, radius, stepM, naviPoints, myGen) {
+  async function startProducer(rawPath, radius, stepM, naviPoints, myGen, tourStops = []) {
     const sph = google.maps.geometry.spherical;
     const seen = new Set();
     const borderMode = $("border").checked;
@@ -953,6 +980,16 @@
     for (const c of rivers) c.exact = refineRiver(c, rawPath, cum).catch(() => null);
     let riverIdx = 0;
     const riverStops = [], riverTaken = []; // exakte Stopps (noch offen / alle angenommenen)
+    // Benannte Stopps einer vorgefertigten Tour auf die Strecke legen (nächster Routenpunkt, max. 500 m)
+    const tourStopList = [];
+    for (const s of tourStops) {
+      const ll = new google.maps.LatLng(s.lat, s.lng);
+      let bi = -1, bd = Infinity;
+      for (let i = 0; i < rawPath.length; i++) { const d = sph.computeDistanceBetween(ll, rawPath[i]); if (d < bd) { bd = d; bi = i; } }
+      if (bi >= 0 && bd < 500) tourStopList.push({ distM: cum[bi], name: s.name });
+    }
+    tourStopList.sort((a, b) => a.distM - b.distM);
+    let tourPending = null; // Tour-Stopp ohne eigenes Street-View-Bild → Name ans nächste Bild hängen
     // Punkt bei Streckenmeter m — ENTLANG der Route (nicht Luftlinie)
     const pointAtDistance = (m) => {
       if (m <= 0) return rawPath[0];
@@ -1018,13 +1055,17 @@
     // Streckendistanz), nicht hinten anhängen — sonst erscheint er nach schon gezeigten Stopps.
     // Ist das Panorama dort schon als normaler Stopp drin (z.B. Abtastpunkt auf der Brücke),
     // wird DIESER markiert statt den Stopp zu verlieren.
-    async function insertSpecial(crossM, label, kind, rad = 150) {
-      const loc = await nearestPano(pointAtDistance(crossM), rad);
-      if (!loc) return;
+    // Rückgabe: true = Stopp gesetzt/markiert, false = dort gibt es kein Street-View-Bild.
+    // rad2 (optional) = zweiter, größerer Suchradius, falls im ersten nichts liegt.
+    async function insertSpecial(crossM, label, kind, rad = 150, rad2 = 0) {
+      const pt = pointAtDistance(crossM);
+      let loc = await nearestPano(pt, rad);
+      if (!loc && rad2) loc = await nearestPano(pt, rad2);
+      if (!loc) return false;
       if (seen.has(loc.pano)) {
         const e = panoList.find((x) => x.pano === loc.pano);
         if (e) { e.border = true; e.label = label; e.kind = kind; }
-        return;
+        return true;
       }
       seen.add(loc.pano);
       const entry = { pano: loc.pano, latLng: loc.latLng, border: true, label, distM: crossM, kind };
@@ -1033,6 +1074,7 @@
         if (panoList[k].distM != null && panoList[k].distM > crossM) { idx = k; break; }
       }
       panoList.splice(idx, 0, entry);
+      return true;
     }
 
     // Grenzerkennung: alle ~7 km den Staat prüfen; bei Wechsel (nur USA/Kanada)
@@ -1071,6 +1113,12 @@
         await insertSpecial(s.distM, "🌊 " + s.name, "river", 60);
         if (myGen !== gen) return false;
       }
+      // Benannte Tour-Stopps (vorgefertigte Touren) als grüner Stopp mit Namen
+      while (tourStopList.length && tourStopList[0].distM <= distM) {
+        const s = tourStopList.shift();
+        if (!(await insertSpecial(s.distM, "📍 " + s.name, "tour", 100, 600))) tourPending = "📍 " + s.name + " (dort kein Street View)";
+        if (myGen !== gen) return false;
+      }
       const poi = poiMode ? nearbyPoi(pt) : null;
       let special = !!poi, label = poi ? poi.name : undefined, rad = poi ? 500 : undefined, kind = poi ? "poi" : null;
       if (!special && scenicMode) {
@@ -1080,7 +1128,13 @@
         if (sb) { special = true; label = "Scenic Byway: " + sb; kind = "scenic"; curScenic = sb; }
         else { curScenic = null; scenicMiss = 0; }
       }
+      const before = panoList.length;
       await pushPano(pt, special, rad, label, distM, kind);
+      if (tourPending && panoList.length > before) { // erstes Bild nach dem bildlosen Tour-Stopp
+        const e = panoList[panoList.length - 1];
+        if (!e.border) { e.border = true; e.label = tourPending; e.kind = "tour"; }
+        tourPending = null;
+      }
       return true;
     };
 
@@ -1676,8 +1730,9 @@
         if (needResync) { smoothHdg = tourPano.getPov().heading; needResync = false; }
 
         segElapsed += dt;
-        // an einem Fluss 3× so lange halten, damit man ihn in Ruhe sieht
-        const hold = panoList[curIdx] && panoList[curIdx].kind === "river" ? 3 : 1;
+        // an einem Fluss 3×, an einem Tour-Stopp 2× so lange halten
+        const k = panoList[curIdx] && panoList[curIdx].kind;
+        const hold = k === "river" ? 3 : k === "tour" ? 2 : 1;
         const f = Math.min(1, segElapsed / (stepMsLive() * hold));
         const fx = $("fx").checked;
         smoothHdg = lerpAngle(smoothHdg, headingAt(curIdx), 0.08);
@@ -1724,7 +1779,9 @@
   $("limitClose").addEventListener("click", () => $("limitWarn").classList.remove("show"));
   $("limitGo").addEventListener("click", () => { limitOverride = true; limitHalted = false; $("limitWarn").classList.remove("show"); });
 
-  $("go").addEventListener("click", async () => {
+  // Gemeinsamer Tour-Start — für eine normale Route (Start → Ziel) UND für vorgefertigte Touren.
+  // getRoute() liefert {path, waypoints, stops}; bei vorgefertigten Touren ist die Strecke fest.
+  async function launchTour(getRoute) {
     const key = $("key").value.trim();
     if (!key) return setStatus("Bitte API-Key eingeben.", true);
     // Am geschätzten Gratis-Limit nicht einfach lostouren (könnte kosten) — erst bestätigen.
@@ -1742,17 +1799,7 @@
       ensurePano();
       loadStateBoundaries(); // Bundesstaat-Polygone laden (für die Info-Zeile), nicht-blockierend
       if ($("rivers").checked) loadRivers(); // Fluss-Daten parallel zur Routensuche vorladen
-      setStatus("Suche Adressen & Route…");
-      const origin = await resolveLocation($("start"));
-      await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
-      const destination = await resolveLocation($("end"));
-      let route = await routePath(origin, destination);
-      if ($("scenicRoute").checked) {
-        setStatus("Suche schöne Strecken in der Nähe…");
-        const scenic = await applyScenicRouting(origin, destination, route);
-        if (scenic) { route = scenic.route; setStatus("Schöne Strecke eingebaut: " + scenic.names.join(", ")); await sleep(900); }
-        else setStatus("Keine passende schöne Strecke in der Nähe.");
-      }
+      const route = await getRoute();
       routePathCoords = route.path; // für die Linie auf der Mini-Karte
 
       // Panoramen on-the-fly suchen (nur ein paar voraus), nicht die ganze Route vorab
@@ -1762,7 +1809,7 @@
       running = true;
       const stepM = Math.max(5, Number($("stepM").value) || 20);
       const navi = $("navi").checked ? route.waypoints : null;
-      startProducer(route.path, Number($("radius").value) || 60, stepM, navi, myGen);
+      startProducer(route.path, Number($("radius").value) || 60, stepM, navi, myGen, route.stops || []);
       setStatus("Suche erste Panoramen…");
       while (myGen === gen && panoList.length < 2 && !producerDone) await sleep(80);
       if (myGen !== gen) return; // schon wieder ersetzt
@@ -1775,5 +1822,86 @@
     } finally {
       $("go").disabled = false;
     }
+  }
+
+  // Normale Tour: Start/Ziel aus den Feldern, alle Routing-Optionen gelten
+  $("go").addEventListener("click", () => {
+    setPresetMode(null);
+    launchTour(async () => {
+      setStatus("Suche Adressen & Route…");
+      const origin = await resolveLocation($("start"));
+      await sleep(1100); // Nominatim: max ~1 Anfrage/Sekunde
+      const destination = await resolveLocation($("end"));
+      let route = await routePath(origin, destination);
+      if ($("scenicRoute").checked) {
+        setStatus("Suche schöne Strecken in der Nähe…");
+        const scenic = await applyScenicRouting(origin, destination, route);
+        if (scenic) { route = scenic.route; setStatus("Schöne Strecke eingebaut: " + scenic.names.join(", ")); await sleep(900); }
+        else setStatus("Keine passende schöne Strecke in der Nähe.");
+      }
+      return route;
+    });
   });
+
+  // --- Vorgefertigte Touren (einmal importiert nach data/tours/, siehe tools/import_tours.py) ---
+  // Die Strecke ist fest: Meiden-/Scenic-Routing würde sie umbauen, darum ausgegraut.
+  const ROUTING_OPTS = ["avoidHw", "avoidToll", "avoidFerry", "scenicRoute"];
+  function setPresetMode(tour) {
+    for (const id of ROUTING_OPTS) $(id).disabled = !!tour;
+    $("presetNote").classList.toggle("show", !!tour);
+  }
+  async function renderTours() {
+    const list = $("tourList");
+    list.innerHTML = '<div class="fav-empty">Lade Touren…</div>';
+    let tours;
+    try { const r = await fetch("/data/tours/index.json", { cache: "no-store" }); if (!r.ok) throw 0; tours = await r.json(); }
+    catch (e) { list.innerHTML = '<div class="fav-empty">Keine Touren gefunden — data/tours/index.json fehlt (tools/import_tours.py ausführen).</div>'; return; }
+    // Anfragen-Schätzung passend zum aktuellen Modus: Navi ≈ 1,3/km (gemessen), sonst 2 je Abtastpunkt
+    const stepM = Math.max(5, Number($("stepM").value) || 20), left = FREE_PER_MONTH - getUsage().count;
+    list.innerHTML = "";
+    for (const t of tours) {
+      const req = Math.round($("navi").checked ? t.km * 1.3 : 2 * t.km * 1000 / stepM);
+      const card = document.createElement("div"); card.className = "tour-card";
+      const main = document.createElement("div"); main.className = "t-main";
+      const title = document.createElement("div"); title.className = "t-title"; title.textContent = t.title;
+      const desc = document.createElement("div"); desc.className = "t-desc"; desc.textContent = t.desc;
+      const meta = document.createElement("div"); meta.className = "t-meta";
+      meta.innerHTML = `${t.stopCount} Stopps · ${t.km.toLocaleString("de-DE")} km · ` +
+        `<span class="${req > left ? "t-warn" : ""}" title="geschätzte Street-View-Anfragen">~${req.toLocaleString("de-DE")} Anfragen</span>` +
+        (t.routedBy === "osrm" ? " · Route selbst berechnet" : "") +
+        ` · <a href="${t.source}" target="_blank" rel="noopener">Roadtrippers ↗</a>`;
+      main.append(title, desc, meta);
+      const go = document.createElement("button"); go.textContent = "▶ Starten"; go.onclick = () => startPresetTour(t.id);
+      card.append(main, go); list.appendChild(card);
+    }
+  }
+  async function startPresetTour(id) {
+    $("tourPanel").classList.remove("show");
+    let t;
+    try { const r = await fetch("/data/tours/" + id + ".json", { cache: "no-store" }); if (!r.ok) throw 0; t = await r.json(); }
+    catch (e) { return setStatus("Tour konnte nicht geladen werden.", true); }
+    setPresetMode(t);
+    // Start/Ziel-Felder zeigen erster/letzter Stopp (mit Koordinaten, ohne erneute Adresssuche)
+    const first = t.stops[0], last = t.stops[t.stops.length - 1];
+    if (first) { $("start").value = first.name; $("start")._picked = { lat: first.lat, lng: first.lng }; }
+    if (last) { $("end").value = last.name; $("end")._picked = { lat: last.lat, lng: last.lng }; }
+    launchTour(async () => {
+      const path = t.path.map(([a, b]) => new google.maps.LatLng(a, b));
+      // Navi-Kreuzungen: OSRM durch die Tour-Stopps; der Producer übernimmt nur die, die
+      // auf DIESER Strecke liegen (< 40 m) — weicht OSRM irgendwo ab, schadet das nicht.
+      let waypoints = [];
+      if ($("navi").checked && t.stops.length >= 2) {
+        setStatus("Suche Kreuzungen entlang der Tour…");
+        try {
+          const S = t.stops.map((s) => new google.maps.LatLng(s.lat, s.lng));
+          waypoints = (await osrmRoute(S[0], S[S.length - 1], S.slice(1, -1))).waypoints;
+        } catch (e) { /* dann nur Tour-Stopps + max. Sprung */ }
+      }
+      setStatus("🗺 " + t.title);
+      return { path, waypoints, stops: t.stops };
+    });
+  }
+  $("tourBtn").addEventListener("click", () => { renderTours(); $("tourPanel").classList.add("show"); });
+  $("tourClose").addEventListener("click", () => $("tourPanel").classList.remove("show"));
+  $("tourPanel").addEventListener("click", (e) => { if (e.target === $("tourPanel")) $("tourPanel").classList.remove("show"); });
 </script>
