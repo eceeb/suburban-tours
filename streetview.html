@@ -6,6 +6,20 @@
   :root { color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; }
   html, body { margin: 0; height: 100%; background: #0b0d12; }
   .stage { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+  /* Autofenster-Ansicht: oben Frontscheibe (100 % × 60 %), unten Seitenscheiben links/rechts */
+  .side { display: none; position: fixed; top: 60vh; width: 50vw; height: 40vh; box-sizing: border-box; border-top: 6px solid #0b0d12; }
+  #sideL { left: 0; border-right: 3px solid #0b0d12; }
+  #sideR { right: 0; border-left: 3px solid #0b0d12; }
+  /* Google setzt auf den Viewer-Container position:relative → darum Wrapper (.side) positionieren */
+  .sideinner { width: 100%; height: 100%; }
+  body.carview #panoA { height: 60vh; }
+  body.carview .side { display: block; }
+  .sidetag { display: none; position: fixed; top: calc(60vh + 12px); z-index: 5; padding: 3px 8px; border-radius: 6px;
+    background: rgba(18,21,28,.75); color: #c3cad6; font-size: 11px; pointer-events: none; }
+  #tagL { left: 12px; } #tagR { right: 12px; }
+  body.carview .sidetag { display: block; }
+  #carBtn { border:0; background:#2a2f3a; color:#e8ecf3; width:34px; height:34px; border-radius:50%; font-size:15px; cursor:pointer; flex:0 0 auto; }
+  #carBtn.on { background:#4c7dff; }
   #panel {
     position: fixed; top: 12px; left: 12px; z-index: 10; width: 300px;
     max-width: calc(100vw - 24px);
@@ -186,6 +200,10 @@
 </style>
 
 <div id="panoA" class="stage"></div>
+<div id="sideL" class="side"><div id="panoL" class="sideinner"></div></div>
+<div id="sideR" class="side"><div id="panoR" class="sideinner"></div></div>
+<div id="tagL" class="sidetag">◀ links</div>
+<div id="tagR" class="sidetag">rechts ▶</div>
 
 <div id="panel">
   <button id="collapse" title="Menü einklappen">–</button>
@@ -292,6 +310,7 @@
 
 <div id="controls">
   <button id="pause" title="Pause / Weiter">⏸</button>
+  <button id="carBtn" title="Autofenster-Ansicht: Front + Seitenscheiben an/aus">🚗</button>
   <span id="radioWrap">
     <button id="radioBtn" title="Radio: Klick = Sender-Menü · Rechtsklick = aus">📻</button>
     <div id="radioMenu"></div>
@@ -321,6 +340,21 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   $("key").value = localStorage.getItem("gmapsKey") || "";
 
+  // localStorage hat nur ~10 MB. Caches (Overpass, Routen, Adressen) dürfen wichtige Einstellungen
+  // nie verdrängen: ist der Speicher voll, werden die Caches geleert und es wird nochmal versucht.
+  // Riesige Cache-Einträge werden gar nicht erst gespeichert (sie füllen den Speicher sonst schnell).
+  const CACHE_PREFIXES = ["ovp2:", "ovp:", "osrm:", "geo:"];
+  function clearCaches() {
+    for (const k of Object.keys(localStorage)) if (CACHE_PREFIXES.some((p) => k.startsWith(p))) localStorage.removeItem(k);
+  }
+  function storeSet(key, val) {
+    if (CACHE_PREFIXES.some((p) => key.startsWith(p)) && val.length > 256 * 1024) return false; // ~0,5 MB
+    try { localStorage.setItem(key, val); return true; }
+    catch (e) {
+      try { clearCaches(); localStorage.setItem(key, val); return true; } catch (e2) { return false; }
+    }
+  }
+
   // Lokaler Verbrauchszähler (Schätzung!) — echtes Kontingent gibt's nur in der Cloud Console.
   const FREE_PER_MONTH = 5000; // grobes Gratis-Kontingent Street View / Monat
   const usageMonth = () => { const d = new Date(); return d.getFullYear() + "-" + (d.getMonth() + 1); };
@@ -344,7 +378,7 @@
   function showLimit(msg) { $("limitMsg").innerHTML = msg; $("limitWarn").classList.add("show"); }
   function bumpUsage(n) {
     const o = getUsage(); const before = o.count; o.count += n;
-    localStorage.setItem("svUsage", JSON.stringify(o));
+    storeSet("svUsage", JSON.stringify(o));
     renderUsage();
     if (before < FREE_PER_MONTH && o.count >= FREE_PER_MONTH && !limitHalted && !limitOverride) {
       limitHalted = true;
@@ -425,7 +459,7 @@
     try { const r = await fetch(url, { headers: { "Accept-Language": "de" }, signal: ctrl.signal }); j = await r.json(); }
     finally { clearTimeout(to); }
     if (!j.length) throw new Error("Nicht gefunden: " + address);
-    try { localStorage.setItem(ck, JSON.stringify({ lat: +j[0].lat, lng: +j[0].lon })); } catch (e) {}
+    storeSet(ck, JSON.stringify({ lat: +j[0].lat, lng: +j[0].lon }));
     return new google.maps.LatLng(+j[0].lat, +j[0].lon);
   }
 
@@ -568,7 +602,7 @@
     if (!j) {
       try { j = await Promise.any(OSRM_MIRRORS.map((b) => osrmFetch(b, pts, 12000))); }
       catch (e) { throw new Error("Keine Route gefunden (Router gerade nicht erreichbar)."); }
-      try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {}
+      storeSet(ck, JSON.stringify(j));
     }
     const route = j.routes[0];
     const path = route.geometry.coordinates.map(([lng, lat]) => new google.maps.LatLng(lat, lng));
@@ -630,7 +664,7 @@
     osmLoading();
     let j = await wave(OVERPASS_MIRRORS.slice(0, 3), q, perTimeout);
     if (!j || !j.elements.length) { const j2 = await wave(OVERPASS_MIRRORS.slice(3), q, perTimeout); if (j2 && j2.elements.length) j = j2; else j = j || j2; }
-    if (j) { osmOk(); if (j.elements.length) { try { localStorage.setItem(ck, JSON.stringify(j)); } catch (e) {} } return j; }
+    if (j) { osmOk(); if (j.elements.length) storeSet(ck, JSON.stringify(j)); return j; }
     osmFail();
     return null;
   }
@@ -1242,7 +1276,42 @@
       svService = new google.maps.StreetViewService();
       // Freies Gehen im Pause-Modus (Klick/Tasten wechselt das Panorama) → Karte/Info/★ mitziehen
       panoA.addListener("pano_changed", () => { if (paused) freeMove(); });
+      // Autofenster: Seitenscheiben folgen jedem Bildwechsel und jeder Drehung der Front
+      panoA.addListener("pano_changed", syncSides);
+      panoA.addListener("pov_changed", syncSides);
+      if (carView) setCarView(true); // gespeicherte Einstellung: Seiten-Viewer jetzt anlegen
     }
+  }
+
+  // --- Autofenster-Ansicht: oben Frontscheibe, unten Seitenscheiben links/rechts ---
+  // Alle drei zeigen DASSELBE Panorama (keine zusätzliche Suche); die Seiten schauen immer
+  // 90° links bzw. rechts von der Front — beim Fahren also seitlich zur Fahrtrichtung.
+  let carView = false, panoL = null, panoR = null;
+  const SIDE_OPTS = {
+    visible: true, motionTracking: false, motionTrackingControl: false, addressControl: false,
+    showRoadLabels: false, fullscreenControl: false, disableDefaultUI: true, clickToGo: false, scrollwheel: false,
+  };
+  const norm = (h) => ((h % 360) + 360) % 360;
+  function syncSides() {
+    if (!carView || !panoA || !panoL) return;
+    const id = panoA.getPano(); if (!id) return;
+    if (panoL.getPano() !== id) { panoL.setPano(id); panoR.setPano(id); bumpUsage(2); } // 2 weitere Ladevorgänge (vorsichtig mitgezählt)
+    const h = panoA.getPov().heading;
+    panoL.setPov({ heading: norm(h - 90), pitch: 0, zoom: 0 });
+    panoR.setPov({ heading: norm(h + 90), pitch: 0, zoom: 0 });
+  }
+  function setCarView(on) {
+    carView = on;
+    document.body.classList.toggle("carview", on);
+    $("carBtn").classList.toggle("on", on);
+    storeSet("svCarView", on ? "1" : "0");
+    if (!panoA) return; // Viewer gibt's erst ab Tour/Ort — ensurePano holt das nach
+    if (on && !panoL) {
+      panoL = new google.maps.StreetViewPanorama($("panoL"), SIDE_OPTS);
+      panoR = new google.maps.StreetViewPanorama($("panoR"), SIDE_OPTS);
+    }
+    google.maps.event.trigger(panoA, "resize"); // Front ist jetzt kleiner/größer
+    if (on) { google.maps.event.trigger(panoL, "resize"); google.maps.event.trigger(panoR, "resize"); syncSides(); }
   }
   // Nach freiem Wechsel im Pause-Modus: aktuelle Position auf Karte/Info/★ spiegeln
   function freeMove() {
@@ -1397,7 +1466,7 @@
     favCache = favs; refreshFav(); updateFavCount();
     if (favApi) fetch("/api/favorites", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(favs) })
       .catch(() => setStatus("Favorit nicht gespeichert — Server nicht erreichbar", true));
-    else localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+    else storeSet(FAV_KEY, JSON.stringify(favs));
   };
   async function loadFavs() {
     try { const r = await fetch("/api/favorites"); if (!r.ok) throw 0; favCache = await r.json(); }
@@ -1756,6 +1825,8 @@
 
   $("pause").addEventListener("click", () => setPause(!paused));
   $("radioBtn").addEventListener("click", radioClick);
+  $("carBtn").addEventListener("click", () => setCarView(!carView));
+  try { if (localStorage.getItem("svCarView") === "1") setCarView(true); } catch (e) {}
   $("radioBtn").addEventListener("contextmenu", (e) => { e.preventDefault(); radioOff(); });
   // Klick außerhalb schließt das Menü. composedPath statt contains: das Menü baut sich beim
   // Klick neu auf, das geklickte Element hängt danach nicht mehr im DOM.
@@ -1791,7 +1862,7 @@
     }
     gen++; // alte Tour (Producer + Wiedergabe) sauber stilllegen
     running = false;
-    localStorage.setItem("gmapsKey", key);
+    storeSet("gmapsKey", key);
     $("go").disabled = true;
     try {
       setStatus("Lade Google Maps…");
