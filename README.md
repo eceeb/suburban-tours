@@ -13,6 +13,11 @@ stores favourites and photos — no build step, no dependencies.
 - **Pause + free look & walk:** pause to drag around and mouse-wheel zoom, and
   move panorama-to-panorama by clicking the road or with the ↑/↓ arrow keys — no
   Google navigation-arrow overlay. Resume continues from where you were looking.
+- **Car-window view (🚗):** windscreen on top (full width, 60 % height, facing
+  the direction of travel) and the left/right side windows below, each 90° off
+  the front and following it as it turns. All three show the same panorama, so
+  no extra lookups (the two extra viewers are counted conservatively in the
+  usage estimate). Toggle in the control bar; the choice is remembered.
 - **Live speed / dwell** control.
 - **Navi mode:** stop at every junction, with a capped max jump (e.g. 10 km on
   a highway between exits).
